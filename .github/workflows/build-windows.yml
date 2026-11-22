@@ -1,0 +1,28 @@
+name: Build FerroX Windows EXE
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust-browser
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Upload ferrox-browser.exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferrox-browser-windows-x86_64
+          path: rust-browser/target/release/ferrox-browser.exe

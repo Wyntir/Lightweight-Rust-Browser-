@@ -1,0 +1,49 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --fx-accent: #FA1E4E;
+  --fx-accent-soft: rgba(250, 30, 78, 0.14);
+  --fx-bg: #0B0D12;
+  --fx-chrome: #0E1118;
+  --fx-panel: #12151E;
+  --fx-card: #161B26;
+  --fx-font-display: "Outfit", system-ui, sans-serif;
+  --fx-font-sans: "Plus Jakarta Sans", system-ui, sans-serif;
+  --fx-font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+body {
+  font-family: var(--fx-font-sans);
+  background-color: var(--fx-bg);
+  color: #ECEFF4;
+  margin: 0;
+}
+
+.font-display {
+  font-family: var(--fx-font-display);
+}
+
+.font-mono-tabular {
+  font-family: var(--fx-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Subtle dark scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
+}

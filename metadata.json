@@ -1,0 +1,8 @@
+{
+  "name": "Remix FerroX Browser",
+  "description": "A lightweight Opera GX-inspired browser built in Rust, with live web browsing, CPU/RAM/network resource limiters, tracker shielding, workspaces, and a downloadable Rust desktop crate.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
