@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import {
   Gauge,
   Globe,
@@ -16,7 +17,7 @@ interface BrowserSidebarProps {
   onNavigateInternal: (url: string) => void;
 }
 
-export function BrowserSidebar({
+export const BrowserSidebar = memo(function BrowserSidebar({
   activeDrawer,
   activeUrl,
   vpnEnabled,
@@ -136,4 +137,4 @@ export function BrowserSidebar({
       </div>
     </aside>
   );
-}
+});

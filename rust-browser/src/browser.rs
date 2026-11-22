@@ -25,6 +25,7 @@ pub struct BrowserConfig {
     pub vpn_enabled: bool,
     pub vpn_region: String,
     pub homepage: String,
+    pub auto_sync_browsers: bool,
 }
 
 impl Default for BrowserConfig {
@@ -42,6 +43,7 @@ impl Default for BrowserConfig {
             vpn_enabled: false,
             vpn_region: "US East".to_string(),
             homepage: "ferrox://speed-dial".to_string(),
+            auto_sync_browsers: true,
         }
     }
 }

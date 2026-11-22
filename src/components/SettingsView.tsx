@@ -8,8 +8,9 @@ import {
   SURFACE_THEMES,
   SurfaceThemeId,
 } from '../lib/browserEngine';
+import { DetectedBrowserProfile } from '../lib/rustBridge';
 import { VaultCredential } from '../lib/vaultCrypto';
-import { ProfileImporterPanel } from './ProfileImporterPanel';
+import { ProfileImporterPanel, SyncSummary } from './ProfileImporterPanel';
 
 interface SettingsViewProps {
   accent: AccentThemeId;
@@ -19,6 +20,10 @@ interface SettingsViewProps {
   hardwareAcceleration: boolean;
   verticalTabs: boolean;
   showBookmarksBar: boolean;
+  detectedProfiles: DetectedBrowserProfile[];
+  autoSyncBrowsers: boolean;
+  syncingProfileId: string | null;
+  lastSyncSummary: SyncSummary | null;
   onChangeAccent: (accent: AccentThemeId) => void;
   onChangeCustomAccentHex: (hex: string) => void;
   onChangeSurfaceTheme: (surface: SurfaceThemeId) => void;
@@ -26,6 +31,9 @@ interface SettingsViewProps {
   onToggleHardwareAcceleration: () => void;
   onToggleVerticalTabs: () => void;
   onToggleBookmarksBar: () => void;
+  onToggleAutoSyncBrowsers: () => void;
+  onRescanProfiles: () => void;
+  onSyncProfile: (profileId: string) => void;
   onImportProfileData: (data: {
     bookmarks: BookmarkItem[];
     history: HistoryItem[];
@@ -43,6 +51,10 @@ export function SettingsView({
   hardwareAcceleration,
   verticalTabs,
   showBookmarksBar,
+  detectedProfiles,
+  autoSyncBrowsers,
+  syncingProfileId,
+  lastSyncSummary,
   onChangeAccent,
   onChangeCustomAccentHex,
   onChangeSurfaceTheme,
@@ -50,6 +62,9 @@ export function SettingsView({
   onToggleHardwareAcceleration,
   onToggleVerticalTabs,
   onToggleBookmarksBar,
+  onToggleAutoSyncBrowsers,
+  onRescanProfiles,
+  onSyncProfile,
   onImportProfileData,
   onClearHistory,
   onResetDefaults,
@@ -201,9 +216,18 @@ export function SettingsView({
           </div>
         </section>
 
-        {/* Import Opera GX & Mozilla Firefox */}
+        {/* Import & Instant Sync Opera GX, Opera & Mozilla Firefox */}
         <section className="pb-6 border-b border-white/8">
-          <ProfileImporterPanel onImportProfileData={onImportProfileData} />
+          <ProfileImporterPanel
+            detectedProfiles={detectedProfiles}
+            autoSyncBrowsers={autoSyncBrowsers}
+            syncingProfileId={syncingProfileId}
+            lastSyncSummary={lastSyncSummary}
+            onToggleAutoSync={onToggleAutoSyncBrowsers}
+            onRescanProfiles={onRescanProfiles}
+            onSyncProfile={onSyncProfile}
+            onImportProfileData={onImportProfileData}
+          />
         </section>
 
         {/* Search Engine */}

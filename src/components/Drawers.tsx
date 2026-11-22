@@ -263,7 +263,7 @@ export function Drawers({
 
   return (
     <section
-      className="flex flex-col w-80 border-r border-white/10 shrink-0 overflow-hidden"
+      className="fx-drawer-in flex flex-col w-80 border-r border-white/10 shrink-0 overflow-hidden"
       style={{ backgroundColor: 'var(--fx-panel)' }}
       aria-label="Sidebar panel"
     >
@@ -284,7 +284,7 @@ export function Drawers({
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-5">
+      <div className="flex-1 overflow-y-auto fx-scroll p-4 space-y-5">
         {/* UPGRADED RESOURCE LIMITER + SITE ISOLATION */}
         {activeDrawer === 'limiter' && (
           <>
@@ -895,26 +895,44 @@ export function Drawers({
         {/* PRIVACY, SHIELD, DOH, CLEAR DATA */}
         {activeDrawer === 'privacy' && (
           <>
-            <div className="flex items-center justify-between p-3 rounded-lg bg-black/25 border border-white/8">
-              <div className="flex items-center gap-2.5">
-                <Shield
-                  className={`w-4 h-4 ${shieldEnabled ? 'text-emerald-400' : 'text-slate-500'}`}
-                  aria-hidden="true"
-                />
-                <div>
-                  <div className="text-sm font-medium text-white">Ad &amp; Tracker Shield</div>
-                  <div className="font-mono-tabular text-xs text-slate-400">
-                    {blockedEvents.length} blocked this session
+            <div className="rounded-lg bg-black/25 border border-white/8 overflow-hidden">
+              <div className="flex items-center justify-between p-3">
+                <div className="flex items-center gap-2.5">
+                  <Shield
+                    className={`w-4 h-4 ${shieldEnabled ? 'text-emerald-400' : 'text-slate-500'}`}
+                    aria-hidden="true"
+                  />
+                  <div>
+                    <div className="text-sm font-medium text-white">Ad &amp; Tracker Shield</div>
+                    <div className="font-mono-tabular text-xs text-slate-400">
+                      {blockedEvents.length} blocked this session
+                    </div>
                   </div>
                 </div>
+                <button
+                  type="button"
+                  onClick={onToggleShield}
+                  className="px-3 py-1.5 rounded-md text-xs font-medium bg-white/8 hover:bg-white/14 text-white whitespace-nowrap"
+                >
+                  {shieldEnabled ? 'Enabled' : 'Paused'}
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={onToggleShield}
-                className="px-3 py-1.5 rounded-md text-xs font-medium bg-white/8 hover:bg-white/14 text-white whitespace-nowrap"
-              >
-                {shieldEnabled ? 'Enabled' : 'Paused'}
-              </button>
+              {blockedEvents.length > 0 && (
+                <div className="border-t border-white/8 px-3 py-2 space-y-1 bg-black/20">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                    Recently Blocked
+                  </div>
+                  {blockedEvents.slice(0, 5).map((ev) => (
+                    <div
+                      key={ev.id}
+                      className="flex items-center justify-between gap-2 text-[11px] font-mono-tabular text-emerald-300/90"
+                    >
+                      <span className="truncate">{ev.host}</span>
+                      <span className="text-slate-500 shrink-0">blocked</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="space-y-2.5 pb-4 border-b border-white/8 text-xs">

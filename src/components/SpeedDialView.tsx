@@ -1,4 +1,4 @@
-import { FormEvent, useState } from 'react';
+import { FormEvent, memo, useState } from 'react';
 import {
   ArrowUpRight,
   Cpu,
@@ -12,33 +12,39 @@ import {
 import { BookmarkItem, LimiterConfig } from '../lib/browserEngine';
 import { isRustNativeShell } from '../lib/rustBridge';
 import backdropImg from '../assets/images/speed_dial_backdrop_1795363253714.jpg';
+import ferroxLogo from '../assets/images/ferrox_logo_icon.png';
 
 interface SpeedDialViewProps {
   bookmarks: BookmarkItem[];
   limiter: LimiterConfig;
   totalRamMb: number;
   blockedTotal: number;
+  detectedProfilesCount?: number;
   onNavigate: (url: string) => void;
   onAddBookmark: (title: string, url: string) => void;
   onOpenLimiter: () => void;
+  onQuickSync?: () => void;
 }
 
 const BACKDROP_URL = backdropImg;
 
-export function SpeedDialView({
+export const SpeedDialView = memo(function SpeedDialView({
   bookmarks,
   limiter,
   totalRamMb,
   blockedTotal,
+  detectedProfilesCount = 0,
   onNavigate,
   onAddBookmark,
   onOpenLimiter,
+  onQuickSync,
 }: SpeedDialViewProps) {
   const [query, setQuery] = useState('');
   const [addingTile, setAddingTile] = useState(false);
   const [tileTitle, setTileTitle] = useState('');
   const [tileUrl, setTileUrl] = useState('');
   const [backdropFailed, setBackdropFailed] = useState(false);
+  const [logoFailed, setLogoFailed] = useState(false);
 
   const handleSearch = (e: FormEvent) => {
     e.preventDefault();
@@ -57,11 +63,11 @@ export function SpeedDialView({
 
   return (
     <div
-      className="@container relative h-full overflow-y-auto"
+      className="@container relative h-full overflow-y-auto fx-scroll"
       style={{ backgroundColor: 'var(--fx-bg)' }}
     >
       {/* Architectural backdrop */}
-      <div className="relative h-52 @md:h-56 w-full overflow-hidden border-b border-white/8 bg-[#10131C]">
+      <div className="relative h-56 @md:h-60 w-full overflow-hidden border-b border-white/8 bg-[#10131C]">
         {!backdropFailed && (
           <img
             src={BACKDROP_URL}
@@ -81,9 +87,28 @@ export function SpeedDialView({
         />
 
         <div className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center">
-          <p className="text-xs font-medium text-slate-300 tracking-wide mb-1.5">
-            FerroX Browser · Rust WebView Core
-          </p>
+          <div className="flex items-center gap-2.5 mb-2">
+            {!logoFailed ? (
+              <img
+                src={ferroxLogo}
+                alt="FerroX Browser emblem"
+                referrerPolicy="no-referrer"
+                onError={() => setLogoFailed(true)}
+                className="w-8 h-8 rounded-lg shadow-md object-cover shrink-0"
+              />
+            ) : (
+              <span
+                className="flex items-center justify-center w-8 h-8 rounded-lg text-xs font-display font-bold text-white shrink-0"
+                style={{ backgroundColor: 'var(--fx-accent)' }}
+                aria-hidden="true"
+              >
+                FX
+              </span>
+            )}
+            <p className="text-xs font-medium text-slate-300 tracking-wide">
+              FerroX Browser · Rust WebView Core
+            </p>
+          </div>
           <h1 className="font-display text-2xl @md:text-4xl font-semibold text-white tracking-tight max-w-xl [text-wrap:balance]">
             Lightweight browsing with bounded memory and speed.
           </h1>
@@ -195,7 +220,7 @@ export function SpeedDialView({
                 key={bm.id}
                 type="button"
                 onClick={() => onNavigate(bm.url)}
-                className="group flex flex-col justify-between p-4 h-24 rounded-xl border border-white/8 hover:border-white/20 text-left transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40"
+                className="fx-tile group flex flex-col justify-between p-4 h-24 rounded-xl border border-white/8 hover:border-white/20 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40"
                 style={{ backgroundColor: 'var(--fx-panel)' }}
               >
                 <div className="flex items-center justify-between w-full">
@@ -283,42 +308,55 @@ export function SpeedDialView({
             <div>
               <div className="flex items-center gap-2 text-xs font-medium text-slate-400">
                 <Terminal className="w-4 h-4" style={{ color: 'var(--fx-accent)' }} aria-hidden="true" />
-                Native Rust Desktop Crate
+                {isRustNativeShell() ? 'Instant Browser Sync' : 'Native Rust Desktop Crate'}
               </div>
               <div className="font-display text-lg font-semibold text-white mt-2">
-                wry + tao + sysinfo
+                {isRustNativeShell()
+                  ? detectedProfilesCount > 0
+                    ? `${detectedProfilesCount} Browser Profile${detectedProfilesCount === 1 ? '' : 's'} Found`
+                    : 'Opera GX & Firefox Sync'
+                  : 'wry + tao + rusqlite'}
               </div>
               <p className="text-xs text-slate-400 mt-1">
-                Inspect all Cargo modules or export the full Rust source archive to build natively.
+                {isRustNativeShell()
+                  ? 'Pull bookmarks and history from Opera GX, Opera, and Firefox in one click.'
+                  : 'Auto-syncs Opera & Firefox profiles natively. Inspect Cargo modules or export the .zip.'}
               </p>
             </div>
             {isRustNativeShell() ? (
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => (onQuickSync ? onQuickSync() : onNavigate('ferrox://settings'))}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white whitespace-nowrap"
+                  style={{ backgroundColor: 'var(--fx-accent)' }}
+                >
+                  {detectedProfilesCount > 0 ? 'Sync Opera & Firefox' : 'Profile Sync'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('ferrox://settings')}
+                  className="text-xs font-medium text-slate-300 hover:text-white whitespace-nowrap"
+                >
+                  Settings
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-3">
                 <button
                   type="button"
                   onClick={() => onNavigate('ferrox://settings')}
                   className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white whitespace-nowrap"
                   style={{ backgroundColor: 'var(--fx-accent)' }}
                 >
-                  Themes &amp; Profile Import
+                  Sync Opera &amp; Firefox
                 </button>
-                <button
-                  type="button"
-                  onClick={() => onNavigate('ferrox://docs')}
-                  className="text-xs font-medium text-slate-300 hover:text-white whitespace-nowrap"
-                >
-                  Shortcuts
-                </button>
-              </div>
-            ) : (
-              <div className="flex items-center gap-3">
                 <button
                   type="button"
                   onClick={() => onNavigate('ferrox://rust-source')}
-                  className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white whitespace-nowrap"
-                  style={{ backgroundColor: 'var(--fx-accent)' }}
+                  className="text-xs font-medium text-slate-300 hover:text-white whitespace-nowrap"
                 >
-                  Explore Rust Source
+                  Rust Source
                 </button>
                 <a
                   href="/api/rust-crate.zip"
@@ -335,4 +373,4 @@ export function SpeedDialView({
       </div>
     </div>
   );
-}
+});

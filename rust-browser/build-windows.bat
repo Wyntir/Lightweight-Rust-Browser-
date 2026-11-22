@@ -1,6 +1,6 @@
 @echo off
 setlocal
-echo Building FerroX Browser (Windows x86_64 release)...
+echo Building FerroX Browser (Windows x86_64 release with icon, manifest, and signature)...
 
 where cargo >nul 2>nul
 if %errorlevel% neq 0 (
@@ -18,6 +18,14 @@ if %errorlevel% neq 0 (
 )
 
 copy /Y target\release\ferrox-browser.exe .\ferrox-browser.exe >nul
+
+echo.
+echo Signing ferrox-browser.exe with Authenticode...
+powershell -NoProfile -ExecutionPolicy Bypass -File .\sign-windows.ps1 -ExePath .\ferrox-browser.exe -TrustLocally
+if %errorlevel% neq 0 (
+    echo [Warning] Code signing skipped or declined. Continuing with unsigned binary.
+)
+
 echo.
 echo Success! Created .\ferrox-browser.exe
 echo Launching FerroX Browser...

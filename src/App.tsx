@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Download as DownloadIcon, ExternalLink, FolderOpen, X } from 'lucide-react';
 import {
   ACCENT_THEMES,
   AccentThemeId,
@@ -7,6 +8,7 @@ import {
   BrowserExtension,
   canGoBack,
   canGoForward,
+  clampZoomFactor,
   createTab,
   DEFAULT_BOOKMARKS,
   DEFAULT_EXTENSIONS,
@@ -18,15 +20,19 @@ import {
   DownloadItem,
   evaluateResourceBudget,
   evaluateUrlSecurity,
+  getNextTabId,
   getOriginFromUrl,
   hexToRgbaSoft,
   HistoryItem,
   LimiterConfig,
   normalizeAddressInput,
   PermissionValue,
+  PersistedSessionTab,
   PrivacySecurityConfig,
+  restoreSessionTabs,
   scanDownloadFilename,
   SearchEngineId,
+  serializeSessionTabs,
   shouldBlockUrl,
   SitePermissions,
   stepBack,
@@ -43,6 +49,7 @@ import { EncryptedVaultPayload, VaultCredential } from './lib/vaultCrypto';
 import { TabStrip, VerticalTabRail } from './components/TabStrip';
 import { AddressToolbar } from './components/AddressToolbar';
 import { BookmarksBar } from './components/BookmarksBar';
+import { FindInPageBar } from './components/FindInPageBar';
 import { BrowserSidebar, DrawerTab } from './components/BrowserSidebar';
 import { Drawers } from './components/Drawers';
 import { SpeedDialView } from './components/SpeedDialView';
@@ -55,13 +62,34 @@ import { TabSearchModal } from './components/TabSearchModal';
 import { PipWindow } from './components/PipWindow';
 import { QuickSettingsPopover } from './components/QuickSettingsPopover';
 import {
+  BrowserShortcutCommand,
+  DetectedBrowserProfile,
   isRustNativeShell,
+  NativeProfileImportResult,
+  requestRustDetectProfiles,
+  requestRustImportProfile,
+  rustActivateTab,
+  rustCloseTab,
+  rustHibernateTab,
+  rustNavigateTab,
+  rustOpenDownloadFile,
+  rustShowDownloadInFolder,
   RustSyncPayload,
+  rustTabBack,
+  rustTabFind,
+  rustTabFindClear,
+  rustTabForward,
+  rustTabReload,
+  rustTabZoom,
+  rustToggleFullscreen,
   sendToRust,
+  syncRustAutoSync,
   syncRustLimiter,
   syncRustSearchEngine,
+  syncRustShield,
   syncRustTheme,
 } from './lib/rustBridge';
+import { SyncSummary } from './components/ProfileImporterPanel';
 
 const STORAGE_KEY = 'ferrox_browser_state_v2';
 const VAULT_STORAGE_KEY = 'ferrox_encrypted_vault_v1';
@@ -78,9 +106,14 @@ interface PersistedState {
   history: HistoryItem[];
   showBookmarksBar: boolean;
   verticalTabs: boolean;
+  autoSyncBrowsers: boolean;
   privacyConfig: PrivacySecurityConfig;
   sitePermissionsMap: Record<string, SitePermissions>;
   extensions: BrowserExtension[];
+  sessionTabs?: PersistedSessionTab[];
+  tabGroups?: TabGroup[];
+  activeWorkspace?: WorkspaceId;
+  activeTabId?: string;
 }
 
 function loadPersistedState(): Partial<PersistedState> {
@@ -162,12 +195,40 @@ export default function App() {
     },
   ]);
 
-  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceId>('personal');
-  const [tabs, setTabs] = useState<Tab[]>(() => [
-    createTab('tab-1', 'personal', 'ferrox://speed-dial'),
-  ]);
-  const [tabGroups, setTabGroups] = useState<TabGroup[]>([]);
-  const [activeTabId, setActiveTabId] = useState<string>('tab-1');
+  const restoredSession = useMemo(() => {
+    const parsedTabs = restoreSessionTabs(initialSaved.sessionTabs);
+    const tabsList =
+      parsedTabs.length > 0 ? parsedTabs : [createTab('tab-1', 'personal', 'ferrox://speed-dial')];
+    const ws: WorkspaceId =
+      initialSaved.activeWorkspace === 'work' ||
+      initialSaved.activeWorkspace === 'gaming' ||
+      initialSaved.activeWorkspace === 'development' ||
+      initialSaved.activeWorkspace === 'personal'
+        ? initialSaved.activeWorkspace
+        : tabsList[0].workspace;
+    const matchedActive =
+      tabsList.find((t) => t.id === initialSaved.activeTabId) ??
+      tabsList.find((t) => t.workspace === ws) ??
+      tabsList[0];
+    let maxNumeric = 1;
+    for (const t of tabsList) {
+      const m = t.id.match(/^tab-(\d+)$/);
+      if (m) {
+        maxNumeric = Math.max(maxNumeric, Number(m[1]));
+      }
+    }
+    return {
+      tabs: tabsList,
+      workspace: matchedActive.workspace,
+      activeTabId: matchedActive.id,
+      nextCounter: maxNumeric + 1,
+    };
+  }, [initialSaved]);
+
+  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceId>(restoredSession.workspace);
+  const [tabs, setTabs] = useState<Tab[]>(restoredSession.tabs);
+  const [tabGroups, setTabGroups] = useState<TabGroup[]>(initialSaved.tabGroups ?? []);
+  const [activeTabId, setActiveTabId] = useState<string>(restoredSession.activeTabId);
   const [splitTabId, setSplitTabId] = useState<string | null>(null);
   const [activeDrawer, setActiveDrawer] = useState<DrawerTab>(null);
   const [quickSettingsOpen, setQuickSettingsOpen] = useState(false);
@@ -175,6 +236,17 @@ export default function App() {
   const [pendingImportedCredentials, setPendingImportedCredentials] = useState<VaultCredential[]>([]);
   const [tabSearchOpen, setTabSearchOpen] = useState(false);
   const [hubInitialSection, setHubInitialSection] = useState<HubSection>('bookmarks');
+
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const [findSignal, setFindSignal] = useState<{
+    tabId: string;
+    seq: number;
+    query: string;
+    backwards: boolean;
+  } | null>(null);
+  const [tabZooms, setTabZooms] = useState<Record<string, number>>({});
+  const [downloadShelfId, setDownloadShelfId] = useState<string | null>(null);
 
   const [readerModeTabs, setReaderModeTabs] = useState<Record<string, boolean>>({});
   const [translatedTabs, setTranslatedTabs] = useState<Record<string, TranslationData | null>>({});
@@ -190,16 +262,30 @@ export default function App() {
   const [loadingTabs, setLoadingTabs] = useState<Record<string, boolean>>({});
   const [errorTabs, setErrorTabs] = useState<Record<string, string | null>>({});
 
+  const [autoSyncBrowsers, setAutoSyncBrowsers] = useState<boolean>(
+    initialSaved.autoSyncBrowsers ?? true
+  );
+  const [detectedProfiles, setDetectedProfiles] = useState<DetectedBrowserProfile[]>([]);
+  const [syncingProfileId, setSyncingProfileId] = useState<string | null>(null);
+  const [lastSyncSummary, setLastSyncSummary] = useState<SyncSummary | null>(null);
+
   const [rustTelemetry, setRustTelemetry] = useState<{ ramMb: number; cpuPercent: number } | null>(
     null
   );
 
-  const tabCounterRef = useRef(2);
+  const tabCounterRef = useRef(restoredSession.nextCounter);
   const autofillCounterRef = useRef(1);
+  const findCounterRef = useRef(1);
+  const closedTabsRef = useRef<Tab[]>([]);
+  const urlResponseCacheRef = useRef<Map<string, LoadedPageData>>(new Map());
   const mainViewportRef = useRef<HTMLElement>(null);
+  const omniboxInputRef = useRef<HTMLInputElement | null>(null);
   const rustInitializedRef = useRef(false);
+  const lastLayoutKeyRef = useRef<string>('');
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
+  const openTabFromNativeRef = useRef<(url: string, background: boolean) => void>(() => {});
+  const executeShortcutRef = useRef<(cmd: BrowserShortcutCommand) => void>(() => {});
 
   // Sync theme CSS variables (surface palette + accent/custom hex)
   useEffect(() => {
@@ -221,41 +307,77 @@ export default function App() {
     root.setProperty('--fx-card', surface.cardHex);
   }, [accent, customAccentHex, surfaceTheme]);
 
-  // Global Ctrl+K / Cmd+K shortcut for Tab Search
+  // Global desktop browser keyboard shortcuts (also mirrored from live WebView2 pages via __ferroxShortcut)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      const mod = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+      let cmd: BrowserShortcutCommand | null = null;
+
+      if (e.key === 'F11') {
+        cmd = 'toggle_fullscreen';
+      } else if (e.key === 'F5' || (mod && !e.altKey && key === 'r')) {
+        cmd = 'reload';
+      } else if (e.altKey && !mod && e.key === 'ArrowLeft') {
+        cmd = 'back';
+      } else if (e.altKey && !mod && e.key === 'ArrowRight') {
+        cmd = 'forward';
+      } else if (e.altKey && !mod && key === 'd') {
+        cmd = 'focus_omnibox';
+      } else if (mod && !e.altKey) {
+        if (key === 't' && e.shiftKey) cmd = 'reopen_tab';
+        else if (key === 't' && !e.shiftKey) cmd = 'new_tab';
+        else if (key === 'w' && !e.shiftKey) cmd = 'close_tab';
+        else if (e.key === 'Tab' && e.shiftKey) cmd = 'prev_tab';
+        else if (e.key === 'Tab' && !e.shiftKey) cmd = 'next_tab';
+        else if (key === 'l') cmd = 'focus_omnibox';
+        else if (key === 'f') cmd = 'find_in_page';
+        else if (key === 'k') cmd = 'tab_search';
+        else if (key === '=' || key === '+') cmd = 'zoom_in';
+        else if (key === '-') cmd = 'zoom_out';
+        else if (key === '0') cmd = 'zoom_reset';
+      }
+
+      if (cmd) {
         e.preventDefault();
-        setTabSearchOpen((open) => !open);
+        executeShortcutRef.current(cmd);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // Persist user preferences, permissions, extensions, and non-private history
+  // Debounced persistence (350ms) including session tabs, tab groups, and active tab
   useEffect(() => {
-    try {
-      const payload: PersistedState = {
-        accent,
-        customAccentHex,
-        surfaceTheme,
-        searchEngine,
-        limiter,
-        shieldEnabled,
-        trackerRules,
-        bookmarks,
-        history: history.slice(0, 120),
-        showBookmarksBar,
-        verticalTabs,
-        privacyConfig,
-        sitePermissionsMap,
-        extensions,
-      };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-    } catch {
-      // Ignore storage quota errors
-    }
+    const timer = window.setTimeout(() => {
+      try {
+        const payload: PersistedState = {
+          accent,
+          customAccentHex,
+          surfaceTheme,
+          searchEngine,
+          limiter,
+          shieldEnabled,
+          trackerRules,
+          bookmarks,
+          history: history.slice(0, 120),
+          showBookmarksBar,
+          verticalTabs,
+          autoSyncBrowsers,
+          privacyConfig,
+          sitePermissionsMap,
+          extensions,
+          sessionTabs: serializeSessionTabs(tabs),
+          tabGroups,
+          activeWorkspace,
+          activeTabId,
+        };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+      } catch {
+        // Ignore storage quota errors
+      }
+    }, 350);
+    return () => window.clearTimeout(timer);
   }, [
     accent,
     customAccentHex,
@@ -268,19 +390,33 @@ export default function App() {
     history,
     showBookmarksBar,
     verticalTabs,
+    autoSyncBrowsers,
     privacyConfig,
     sitePermissionsMap,
     extensions,
+    tabs,
+    tabGroups,
+    activeWorkspace,
+    activeTabId,
   ]);
 
   // Native Rust desktop shell sync (live sysinfo telemetry + persisted config.json hydration)
   useEffect(() => {
     if (!isRustNativeShell()) return;
+    const updateTelemetry = (ramMbRaw?: number, cpuPercentRaw?: number) => {
+      const nextRam = ramMbRaw ?? 0;
+      const nextCpu = Number((cpuPercentRaw ?? 0).toFixed(1));
+      setRustTelemetry((prev) =>
+        prev && prev.ramMb === nextRam && prev.cpuPercent === nextCpu
+          ? prev
+          : { ramMb: nextRam, cpuPercent: nextCpu }
+      );
+    };
+    window.__ferroxTelemetry = (telemetry) => {
+      updateTelemetry(telemetry.ramMb, telemetry.cpuPercent);
+    };
     window.__ferroxSync = (payload: RustSyncPayload) => {
-      setRustTelemetry({
-        ramMb: payload.ramMb ?? 0,
-        cpuPercent: Number((payload.cpuPercent ?? 0).toFixed(1)),
-      });
+      updateTelemetry(payload.ramMb, payload.cpuPercent);
       if (!rustInitializedRef.current) {
         rustInitializedRef.current = true;
         if (
@@ -317,6 +453,9 @@ export default function App() {
         if (typeof payload.showBookmarksBar === 'boolean') {
           setShowBookmarksBar(payload.showBookmarksBar);
         }
+        if (typeof payload.autoSyncBrowsers === 'boolean') {
+          setAutoSyncBrowsers(payload.autoSyncBrowsers);
+        }
         setPrivacyConfig((prev) => ({
           ...prev,
           hardwareAcceleration: payload.hardwareAcceleration ?? prev.hardwareAcceleration,
@@ -326,11 +465,11 @@ export default function App() {
       }
     };
     window.__ferroxContentUpdate = (update) => {
-      const currentId = activeTabIdRef.current;
-      if (!currentId) return;
+      const targetId = update.tabId || activeTabIdRef.current;
+      if (!targetId) return;
       setTabs((prev) =>
         prev.map((t) => {
-          if (t.id !== currentId || t.url.startsWith('ferrox://')) return t;
+          if (t.id !== targetId || t.url.startsWith('ferrox://')) return t;
           const nextUrl =
             update.url && (update.url.startsWith('http://') || update.url.startsWith('https://'))
               ? update.url
@@ -342,16 +481,193 @@ export default function App() {
               ? deriveTitleFromUrl(nextUrl)
               : t.title;
           if (nextUrl === t.url && nextTitle === t.title) return t;
-          return { ...t, url: nextUrl, title: nextTitle };
+          if (nextUrl !== t.url) {
+            if (t.historyIndex > 0 && t.history[t.historyIndex - 1] === nextUrl) {
+              return { ...stepBack(t), title: nextTitle };
+            }
+            if (
+              t.historyIndex + 1 < t.history.length &&
+              t.history[t.historyIndex + 1] === nextUrl
+            ) {
+              return { ...stepForward(t), title: nextTitle };
+            }
+            return tabHistoryNavigate(t, nextUrl, nextTitle);
+          }
+          return { ...t, title: nextTitle };
         })
       );
     };
+    window.__ferroxOpenTab = (payload) => {
+      if (payload && typeof payload.url === 'string' && payload.url.trim()) {
+        openTabFromNativeRef.current(payload.url, payload.background !== false);
+      }
+    };
+    window.__ferroxShortcut = (cmd) => {
+      executeShortcutRef.current(cmd);
+    };
+    window.__ferroxAdBlocked = (payload) => {
+      if (!payload) return;
+      const host =
+        typeof payload.host === 'string' && payload.host.trim()
+          ? payload.host.trim()
+          : 'youtube-ads';
+      const pageUrl = typeof payload.url === 'string' ? payload.url : '';
+      const event: BlockedEvent = {
+        id: `blk-native-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        host,
+        pageUrl,
+        timestamp: Date.now(),
+      };
+      setBlockedEvents((prev) => [event, ...prev].slice(0, 200));
+    };
+    window.__ferroxDownloadEvent = (ev) => {
+      if (!ev || typeof ev.url !== 'string') return;
+      if (ev.phase === 'started') {
+        const id = ev.id || `native-dl-${Date.now()}`;
+        const filename = ev.filename || 'download.bin';
+        const newItem: DownloadItem = {
+          id,
+          filename,
+          url: ev.url,
+          savedPath: ev.savedPath,
+          bytesReceived: 16384,
+          totalBytes: 100000,
+          status: 'downloading',
+          warning: ev.warning ?? null,
+          startedAt: Date.now(),
+        };
+        setDownloads((prev) => [newItem, ...prev]);
+        setDownloadShelfId(id);
+      } else if (ev.phase === 'completed') {
+        setDownloads((prev) => {
+          let matchedId: string | null = null;
+          const updated = prev.map((d) => {
+            const isMatch =
+              !matchedId &&
+              d.status === 'downloading' &&
+              (d.url === ev.url || (ev.savedPath && d.savedPath === ev.savedPath));
+            if (!isMatch) return d;
+            matchedId = d.id;
+            return {
+              ...d,
+              savedPath: ev.savedPath ?? d.savedPath,
+              bytesReceived: d.totalBytes,
+              status: ev.success ? ('completed' as const) : ('blocked' as const),
+              warning: ev.success ? d.warning : d.warning ?? 'Download failed or was interrupted.',
+            };
+          });
+          if (matchedId) {
+            setDownloadShelfId(matchedId);
+          }
+          return updated;
+        });
+      }
+    };
+    window.__ferroxProfilesDetected = (profiles: DetectedBrowserProfile[]) => {
+      if (Array.isArray(profiles)) {
+        setDetectedProfiles(profiles);
+      }
+    };
+    window.__ferroxProfileImported = (results: NativeProfileImportResult[]) => {
+      setSyncingProfileId(null);
+      if (!Array.isArray(results) || results.length === 0) {
+        setLastSyncSummary({
+          message: 'No matching Opera or Firefox profile data found to import.',
+          notes: [],
+        });
+        return;
+      }
+
+      const incomingBookmarks: BookmarkItem[] = [];
+      const incomingHistory: HistoryItem[] = [];
+      const incomingCredentials: VaultCredential[] = [];
+      const notes: string[] = [];
+      const sourceNames = new Set<string>();
+      const ts = Date.now();
+
+      results.forEach((res, rIdx) => {
+        sourceNames.add(res.browserName);
+        (res.bookmarks ?? []).forEach((bm, bIdx) => {
+          incomingBookmarks.push({
+            id: `sync-bm-${ts}-${rIdx}-${bIdx}`,
+            title: bm.title,
+            url: bm.url,
+            category: bm.category || res.browserName,
+            pinnedToBar: bm.pinnedToBar,
+          });
+        });
+        (res.history ?? []).forEach((h, hIdx) => {
+          incomingHistory.push({
+            id: `sync-hist-${ts}-${rIdx}-${hIdx}`,
+            title: h.title,
+            url: h.url,
+            visitedAt: h.visitedAt || ts,
+          });
+        });
+        (res.credentials ?? []).forEach((c, cIdx) => {
+          incomingCredentials.push({
+            id: `sync-cred-${ts}-${rIdx}-${cIdx}`,
+            site: c.site,
+            username: c.username,
+            password: c.password,
+            updatedAt: ts,
+          });
+        });
+        (res.notes ?? []).forEach((n) => {
+          if (n && !notes.includes(n)) notes.push(n);
+        });
+      });
+
+      if (incomingBookmarks.length > 0) {
+        setBookmarks((prev) => {
+          const seen = new Set(prev.map((b) => b.url));
+          const uniqueIncoming = incomingBookmarks.filter((b) => {
+            if (seen.has(b.url)) return false;
+            seen.add(b.url);
+            return true;
+          });
+          return [...prev, ...uniqueIncoming];
+        });
+      }
+      if (incomingHistory.length > 0) {
+        setHistory((prev) => {
+          const seen = new Set(prev.map((h) => h.url));
+          const uniqueIncoming = incomingHistory.filter((h) => {
+            if (seen.has(h.url)) return false;
+            seen.add(h.url);
+            return true;
+          });
+          return [...uniqueIncoming, ...prev].slice(0, 250);
+        });
+      }
+      if (incomingCredentials.length > 0) {
+        setPendingImportedCredentials((prev) => [...incomingCredentials, ...prev]);
+      }
+
+      const browserList = Array.from(sourceNames).join(', ');
+      setLastSyncSummary({
+        message: `Synced ${incomingBookmarks.length} bookmarks, ${incomingHistory.length} history items, and ${incomingCredentials.length} logins from ${browserList}.`,
+        notes,
+      });
+    };
     sendToRust('ready');
+    // Activate restored external tab lazily on native startup
+    const bootActive = restoredSession.tabs.find((t) => t.id === restoredSession.activeTabId);
+    if (bootActive && !bootActive.url.startsWith('ferrox://')) {
+      rustActivateTab(bootActive.id, bootActive.url, bootActive.isPrivate);
+    }
     return () => {
       delete window.__ferroxSync;
+      delete window.__ferroxTelemetry;
       delete window.__ferroxContentUpdate;
+      delete window.__ferroxOpenTab;
+      delete window.__ferroxShortcut;
+      delete window.__ferroxAdBlocked;
+      delete window.__ferroxDownloadEvent;
+      delete window.__ferroxProfilesDetected;
+      delete window.__ferroxProfileImported;
     };
-  }, []);
+  }, [restoredSession]);
 
   // Sync theme, limiter, search engine, and privacy changes to Rust config when inside .exe
   useEffect(() => {
@@ -381,6 +697,16 @@ export default function App() {
 
   useEffect(() => {
     if (!isRustNativeShell() || !rustInitializedRef.current) return;
+    syncRustAutoSync(autoSyncBrowsers);
+  }, [autoSyncBrowsers]);
+
+  useEffect(() => {
+    if (!isRustNativeShell()) return;
+    syncRustShield(shieldEnabled, trackerRules);
+  }, [shieldEnabled, trackerRules]);
+
+  useEffect(() => {
+    if (!isRustNativeShell() || !rustInitializedRef.current) return;
     sendToRust('set_privacy', {
       httpsOnly: privacyConfig.httpsOnly,
       safeBrowsing: privacyConfig.safeBrowsing,
@@ -396,7 +722,7 @@ export default function App() {
     privacyConfig.vpnRegion,
   ]);
 
-  // Progress active downloads smoothly
+  // Progress active downloads smoothly (native WebView2 downloads cap at 85% until native DownloadCompleted fires)
   useEffect(() => {
     const hasDownloading = downloads.some((d) => d.status === 'downloading');
     if (!hasDownloading) return;
@@ -404,6 +730,11 @@ export default function App() {
       setDownloads((prev) =>
         prev.map((d) => {
           if (d.status !== 'downloading') return d;
+          if (d.id.startsWith('native-dl-')) {
+            const cap = Math.floor(d.totalBytes * 0.85);
+            const nextBytes = Math.min(cap, d.bytesReceived + Math.ceil(d.totalBytes / 10));
+            return nextBytes === d.bytesReceived ? d : { ...d, bytesReceived: nextBytes };
+          }
           const nextBytes = Math.min(d.totalBytes, d.bytesReceived + Math.ceil(d.totalBytes / 5));
           return {
             ...d,
@@ -421,10 +752,15 @@ export default function App() {
     [tabs, activeTabId, limiter, splitTabId]
   );
 
-  // Apply automatic hibernation when RAM limit triggers
+  // Apply automatic hibernation when RAM limit triggers and actually drop native WebViews to reclaim RAM
   useEffect(() => {
     if (budget.hibernatedIds.length > 0) {
       setTabs(budget.tabs);
+      if (isRustNativeShell()) {
+        for (const id of budget.hibernatedIds) {
+          rustHibernateTab(id);
+        }
+      }
     }
   }, [budget.hibernatedIds, budget.tabs]);
 
@@ -443,14 +779,16 @@ export default function App() {
     [budget.tabs, splitTabId, activeTab?.id]
   );
 
-  // Keep native Rust content_webview aligned with the active viewport pane & hidden behind overlays/ferrox:// routes
+  // Keep native Rust active tab WebView aligned via rAF-coalesced, deduplicated bounds updates
   useEffect(() => {
     if (!isRustNativeShell()) return;
     if (activeTab?.url.startsWith('ferrox://')) {
       sendToRust('set_active_url', { url: activeTab.url });
     }
-    const syncLayout = () => {
-      const container = (mainViewportRef.current?.firstElementChild as HTMLElement | null) ?? mainViewportRef.current;
+    let rafId = 0;
+    const syncLayoutNow = () => {
+      rafId = 0;
+      const container = mainViewportRef.current;
       if (!container) return;
       const rect = container.getBoundingClientRect();
       const isExternal = Boolean(
@@ -458,30 +796,40 @@ export default function App() {
       );
       const overlayBlocks =
         quickSettingsOpen || tabSearchOpen || toolbarPopoverOpen || Boolean(pipTabId);
-      sendToRust('layout', {
-        left: Math.round(rect.left),
-        top: Math.round(rect.top),
-        width: Math.max(1, Math.round(rect.width)),
-        height: Math.max(1, Math.round(rect.height)),
-        visible: isExternal && !overlayBlocks,
-      });
+      const left = Math.round(rect.left);
+      const top = Math.round(rect.top);
+      const rawWidth = splitTab ? rect.width / 2 : rect.width;
+      const width = Math.max(1, Math.round(rawWidth));
+      const height = Math.max(1, Math.round(rect.height));
+      const visible = isExternal && !overlayBlocks;
+      const key = `${activeTab?.id ?? ''},${left},${top},${width},${height},${visible ? 1 : 0}`;
+      if (lastLayoutKeyRef.current === key) return;
+      lastLayoutKeyRef.current = key;
+      sendToRust('layout', { left, top, width, height, visible });
     };
-    syncLayout();
+    const scheduleSyncLayout = () => {
+      if (rafId !== 0) return;
+      rafId = window.requestAnimationFrame(syncLayoutNow);
+    };
+    syncLayoutNow();
     const observer =
       typeof ResizeObserver !== 'undefined' && mainViewportRef.current
-        ? new ResizeObserver(syncLayout)
+        ? new ResizeObserver(scheduleSyncLayout)
         : null;
     if (observer && mainViewportRef.current) {
       observer.observe(mainViewportRef.current);
     }
-    window.addEventListener('resize', syncLayout);
+    window.addEventListener('resize', scheduleSyncLayout, { passive: true });
     return () => {
+      if (rafId !== 0) window.cancelAnimationFrame(rafId);
       observer?.disconnect();
-      window.removeEventListener('resize', syncLayout);
+      window.removeEventListener('resize', scheduleSyncLayout);
     };
   }, [
     activeTab,
     activeDrawer,
+    downloadShelfId,
+    findOpen,
     pipTabId,
     quickSettingsOpen,
     showBookmarksBar,
@@ -492,7 +840,16 @@ export default function App() {
   ]);
 
   const fetchExternalUrl = useCallback(
-    async (tabId: string, url: string, options?: { bypassSafeBrowsing?: boolean; isPrivate?: boolean }) => {
+    async (
+      tabId: string,
+      url: string,
+      options?: {
+        bypassSafeBrowsing?: boolean;
+        isPrivate?: boolean;
+        background?: boolean;
+        forceReload?: boolean;
+      }
+    ) => {
       if (url.startsWith('ferrox://')) return;
 
       const sec = evaluateUrlSecurity(
@@ -565,7 +922,10 @@ export default function App() {
       }
 
       if (isRustNativeShell()) {
-        sendToRust('navigate', { url: targetUrl });
+        rustNavigateTab(tabId, targetUrl, {
+          isPrivate: options?.isPrivate,
+          background: options?.background,
+        });
         setErrorTabs((prev) => ({ ...prev, [tabId]: null }));
         setLoadingTabs((prev) => ({ ...prev, [tabId]: false }));
         if (!options?.isPrivate) {
@@ -580,6 +940,21 @@ export default function App() {
           ]);
         }
         return;
+      }
+
+      // Instant HTTP response cache hit for web preview (bypassed on explicit Reload)
+      const cacheKey = `${targetUrl}|${shieldEnabled ? 1 : 0}|${privacyConfig.fingerprintProtection ? 1 : 0}`;
+      if (!options?.forceReload && !options?.isPrivate) {
+        const cachedPage = urlResponseCacheRef.current.get(cacheKey);
+        if (cachedPage) {
+          setPageCache((prev) => ({ ...prev, [tabId]: cachedPage }));
+          setTabs((prev) =>
+            prev.map((t) => (t.id === tabId ? { ...t, title: cachedPage.title } : t))
+          );
+          setErrorTabs((prev) => ({ ...prev, [tabId]: null }));
+          setLoadingTabs((prev) => ({ ...prev, [tabId]: false }));
+          return;
+        }
       }
 
       setLoadingTabs((prev) => ({ ...prev, [tabId]: true }));
@@ -617,6 +992,14 @@ export default function App() {
           upgradedFromHttp: sec.upgradedFromHttp,
           insecureHttpWarning: sec.insecureHttpWarning,
         };
+
+        if (!options?.isPrivate && !loaded.blockedByShield) {
+          if (urlResponseCacheRef.current.size >= 40) {
+            const oldestKey = urlResponseCacheRef.current.keys().next().value;
+            if (oldestKey) urlResponseCacheRef.current.delete(oldestKey);
+          }
+          urlResponseCacheRef.current.set(cacheKey, loaded);
+        }
 
         setPageCache((prev) => ({ ...prev, [tabId]: loaded }));
         setTabs((prev) =>
@@ -667,6 +1050,17 @@ export default function App() {
     ]
   );
 
+  // Hydrate restored external active tab on initial boot in Web Preview mode
+  const webBootHydratedRef = useRef(false);
+  useEffect(() => {
+    if (webBootHydratedRef.current || isRustNativeShell()) return;
+    webBootHydratedRef.current = true;
+    const bootActive = restoredSession.tabs.find((t) => t.id === restoredSession.activeTabId);
+    if (bootActive && !bootActive.url.startsWith('ferrox://')) {
+      void fetchExternalUrl(bootActive.id, bootActive.url, { isPrivate: bootActive.isPrivate });
+    }
+  }, [fetchExternalUrl, restoredSession]);
+
   const navigateTab = useCallback(
     (tabId: string, rawInput: string) => {
       const normalized = normalizeAddressInput(rawInput, searchEngine);
@@ -680,6 +1074,9 @@ export default function App() {
       if (!normalized.startsWith('ferrox://')) {
         void fetchExternalUrl(tabId, normalized, { isPrivate: targetTab?.isPrivate });
       } else {
+        if (isRustNativeShell()) {
+          rustActivateTab(tabId, normalized, Boolean(targetTab?.isPrivate));
+        }
         setErrorTabs((prev) => ({ ...prev, [tabId]: null }));
         setLoadingTabs((prev) => ({ ...prev, [tabId]: false }));
       }
@@ -696,32 +1093,61 @@ export default function App() {
   );
 
   const handleNewTab = useCallback(
-    (initialUrl: string = 'ferrox://speed-dial', isPrivate: boolean = false) => {
+    (
+      initialUrl: string = 'ferrox://speed-dial',
+      isPrivate: boolean = false,
+      background: boolean = false
+    ) => {
       const id = `tab-${tabCounterRef.current++}`;
       const newTab = createTab(id, activeWorkspace, initialUrl, Date.now(), { isPrivate });
       setTabs((prev) => [...prev, newTab]);
-      setActiveTabId(id);
+      if (!background) {
+        setActiveTabId(id);
+      }
       if (isPrivate && privacyConfig.vpnAutoConnectPrivate && !privacyConfig.vpnEnabled) {
         setPrivacyConfig((prev) => ({ ...prev, vpnEnabled: true }));
       }
       if (!newTab.url.startsWith('ferrox://')) {
-        void fetchExternalUrl(id, newTab.url, { isPrivate });
+        void fetchExternalUrl(id, newTab.url, { isPrivate, background });
+      } else if (!background && isRustNativeShell()) {
+        rustActivateTab(id, newTab.url, isPrivate);
       }
     },
     [activeWorkspace, fetchExternalUrl, privacyConfig.vpnAutoConnectPrivate, privacyConfig.vpnEnabled]
   );
 
+  const handleOpenBackgroundTab = useCallback(
+    (rawUrl: string) => {
+      handleNewTab(rawUrl, false, true);
+    },
+    [handleNewTab]
+  );
+
+  openTabFromNativeRef.current = (url: string, background: boolean) => {
+    handleNewTab(url, false, background);
+  };
+
   const handleCloseTab = useCallback(
     (id: string) => {
       const closing = tabs.find((t) => t.id === id);
-      if (closing?.isPrivate) {
-        // Purge private tab cache immediately on close
-        setPageCache((prev) => {
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
+      if (closing && !closing.isPrivate) {
+        closedTabsRef.current = [...closedTabsRef.current.slice(-24), closing];
       }
+      if (isRustNativeShell()) {
+        rustCloseTab(id);
+      }
+      setPageCache((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setTabZooms((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
       if (splitTabId === id) {
         setSplitTabId(null);
       }
@@ -732,8 +1158,12 @@ export default function App() {
       if (id === activeTabId) {
         const wsRemaining = tabs.filter((t) => t.id !== id && t.workspace === activeWorkspace);
         const fallback = wsRemaining[wsRemaining.length - 1];
-        if (fallback && !fallback.url.startsWith('ferrox://') && isRustNativeShell()) {
-          sendToRust('navigate', { url: fallback.url });
+        if (isRustNativeShell()) {
+          if (fallback) {
+            rustActivateTab(fallback.id, fallback.url, fallback.isPrivate);
+          } else {
+            sendToRust('set_active_url', { url: 'ferrox://speed-dial' });
+          }
         }
       }
 
@@ -760,6 +1190,26 @@ export default function App() {
     [activeTabId, activeWorkspace, pipTabId, splitTabId, tabs]
   );
 
+  const handleReopenClosedTab = useCallback(() => {
+    const popped = closedTabsRef.current.pop();
+    if (!popped) return;
+    const restoredId = `tab-${tabCounterRef.current++}`;
+    const restored: Tab = {
+      ...popped,
+      id: restoredId,
+      hibernated: false,
+      lastActiveAt: Date.now(),
+    };
+    setTabs((prev) => [...prev, restored]);
+    setActiveWorkspace(restored.workspace);
+    setActiveTabId(restoredId);
+    if (!restored.url.startsWith('ferrox://')) {
+      void fetchExternalUrl(restoredId, restored.url, { isPrivate: false });
+    } else if (isRustNativeShell()) {
+      rustActivateTab(restoredId, restored.url, false);
+    }
+  }, [fetchExternalUrl]);
+
   const handleSelectWorkspace = useCallback(
     (ws: WorkspaceId) => {
       setActiveWorkspace(ws);
@@ -767,16 +1217,21 @@ export default function App() {
       const existing = tabs.find((t) => t.workspace === ws);
       if (existing) {
         setActiveTabId(existing.id);
-        if (!existing.url.startsWith('ferrox://') && isRustNativeShell()) {
-          sendToRust('navigate', { url: existing.url });
+        if (isRustNativeShell()) {
+          rustActivateTab(existing.id, existing.url, existing.isPrivate);
+        } else if (!existing.url.startsWith('ferrox://') && !pageCache[existing.id]) {
+          void fetchExternalUrl(existing.id, existing.url, { isPrivate: existing.isPrivate });
         }
       } else {
         const fresh = createTab(`tab-${tabCounterRef.current++}`, ws, 'ferrox://speed-dial');
         setTabs((prev) => [...prev, fresh]);
         setActiveTabId(fresh.id);
+        if (isRustNativeShell()) {
+          rustActivateTab(fresh.id, fresh.url, false);
+        }
       }
     },
-    [tabs]
+    [fetchExternalUrl, pageCache, tabs]
   );
 
   const handleSelectTab = useCallback(
@@ -791,10 +1246,11 @@ export default function App() {
         )
       );
       setActiveTabId(id);
-      if (target && !target.url.startsWith('ferrox://')) {
+      if (target) {
         if (isRustNativeShell()) {
-          sendToRust('navigate', { url: target.url });
-        } else if (!pageCache[id]) {
+          // Activate existing per-tab WebView WITHOUT reloading it!
+          rustActivateTab(target.id, target.url, target.isPrivate);
+        } else if (!target.url.startsWith('ferrox://') && !pageCache[id]) {
           void fetchExternalUrl(id, target.url, { isPrivate: target.isPrivate });
         }
       }
@@ -803,7 +1259,22 @@ export default function App() {
   );
 
   const handleBack = useCallback(() => {
-    if (!activeTab || !canGoBack(activeTab)) return;
+    if (!activeTab) return;
+    if (isRustNativeShell() && !activeTab.url.startsWith('ferrox://')) {
+      if (canGoBack(activeTab)) {
+        const nextTab = stepBack(activeTab);
+        setTabs((prev) => prev.map((t) => (t.id === activeTab.id ? nextTab : t)));
+        if (nextTab.url.startsWith('ferrox://')) {
+          rustActivateTab(activeTab.id, nextTab.url, activeTab.isPrivate);
+        } else {
+          rustTabBack(activeTab.id);
+        }
+      } else {
+        rustTabBack(activeTab.id);
+      }
+      return;
+    }
+    if (!canGoBack(activeTab)) return;
     const nextTab = stepBack(activeTab);
     setTabs((prev) => prev.map((t) => (t.id === activeTab.id ? nextTab : t)));
     if (!nextTab.url.startsWith('ferrox://')) {
@@ -812,7 +1283,22 @@ export default function App() {
   }, [activeTab, fetchExternalUrl]);
 
   const handleForward = useCallback(() => {
-    if (!activeTab || !canGoForward(activeTab)) return;
+    if (!activeTab) return;
+    if (isRustNativeShell() && !activeTab.url.startsWith('ferrox://')) {
+      if (canGoForward(activeTab)) {
+        const nextTab = stepForward(activeTab);
+        setTabs((prev) => prev.map((t) => (t.id === activeTab.id ? nextTab : t)));
+        if (nextTab.url.startsWith('ferrox://')) {
+          rustActivateTab(activeTab.id, nextTab.url, activeTab.isPrivate);
+        } else {
+          rustTabForward(activeTab.id);
+        }
+      } else {
+        rustTabForward(activeTab.id);
+      }
+      return;
+    }
+    if (!canGoForward(activeTab)) return;
     const nextTab = stepForward(activeTab);
     setTabs((prev) => prev.map((t) => (t.id === activeTab.id ? nextTab : t)));
     if (!nextTab.url.startsWith('ferrox://')) {
@@ -824,12 +1310,126 @@ export default function App() {
     if (!activeTab) return;
     if (!activeTab.url.startsWith('ferrox://')) {
       if (isRustNativeShell()) {
-        sendToRust('reload');
+        rustTabReload(activeTab.id);
       } else {
-        void fetchExternalUrl(activeTab.id, activeTab.url, { isPrivate: activeTab.isPrivate });
+        void fetchExternalUrl(activeTab.id, activeTab.url, {
+          isPrivate: activeTab.isPrivate,
+          forceReload: true,
+        });
       }
     }
   }, [activeTab, fetchExternalUrl]);
+
+  const handleAdjustZoom = useCallback(
+    (mode: 'in' | 'out' | 'reset') => {
+      if (!activeTab) return;
+      const current = tabZooms[activeTab.id] ?? 1;
+      const next =
+        mode === 'reset'
+          ? 1
+          : clampZoomFactor(current + (mode === 'in' ? 0.1 : -0.1));
+      setTabZooms((prev) => ({ ...prev, [activeTab.id]: next }));
+      if (isRustNativeShell()) {
+        rustTabZoom(activeTab.id, next);
+      }
+    },
+    [activeTab, tabZooms]
+  );
+
+  const handleFindStep = useCallback(
+    (query: string, backwards: boolean) => {
+      if (!activeTab) return;
+      if (isRustNativeShell() && !activeTab.url.startsWith('ferrox://')) {
+        if (query.trim()) {
+          rustTabFind(activeTab.id, query, backwards);
+        } else {
+          rustTabFindClear(activeTab.id);
+        }
+      } else if (!activeTab.url.startsWith('ferrox://')) {
+        setFindSignal({
+          tabId: activeTab.id,
+          seq: findCounterRef.current++,
+          query,
+          backwards,
+        });
+      } else if (query.trim()) {
+        const winWithFind = window as Window & { find?: (...args: unknown[]) => boolean };
+        if (typeof winWithFind.find === 'function') {
+          winWithFind.find(query, false, backwards, true);
+        }
+      }
+    },
+    [activeTab]
+  );
+
+  const handleCloseFind = useCallback(() => {
+    setFindOpen(false);
+    setFindQuery('');
+    if (activeTab && isRustNativeShell()) {
+      rustTabFindClear(activeTab.id);
+    }
+  }, [activeTab]);
+
+  executeShortcutRef.current = (cmd: BrowserShortcutCommand) => {
+    switch (cmd) {
+      case 'new_tab':
+        handleNewTab('ferrox://speed-dial', false, false);
+        break;
+      case 'close_tab':
+        if (activeTab) handleCloseTab(activeTab.id);
+        break;
+      case 'reopen_tab':
+        handleReopenClosedTab();
+        break;
+      case 'next_tab': {
+        const nextId = getNextTabId(workspaceTabs, activeTab?.id ?? null, 1);
+        if (nextId) handleSelectTab(nextId);
+        break;
+      }
+      case 'prev_tab': {
+        const prevId = getNextTabId(workspaceTabs, activeTab?.id ?? null, -1);
+        if (prevId) handleSelectTab(prevId);
+        break;
+      }
+      case 'focus_omnibox':
+        omniboxInputRef.current?.focus();
+        omniboxInputRef.current?.select();
+        break;
+      case 'reload':
+        handleReload();
+        break;
+      case 'back':
+        handleBack();
+        break;
+      case 'forward':
+        handleForward();
+        break;
+      case 'find_in_page':
+        setFindOpen(true);
+        break;
+      case 'tab_search':
+        setTabSearchOpen((open) => !open);
+        break;
+      case 'zoom_in':
+        handleAdjustZoom('in');
+        break;
+      case 'zoom_out':
+        handleAdjustZoom('out');
+        break;
+      case 'zoom_reset':
+        handleAdjustZoom('reset');
+        break;
+      case 'toggle_fullscreen':
+        if (isRustNativeShell()) {
+          rustToggleFullscreen();
+        } else if (document.fullscreenElement) {
+          void document.exitFullscreen().catch(() => {});
+        } else {
+          void document.documentElement.requestFullscreen?.().catch(() => {});
+        }
+        break;
+    }
+  };
 
   const handleToggleBookmark = useCallback(() => {
     if (!activeTab) return;
@@ -920,6 +1520,7 @@ export default function App() {
     (scope: 'cache' | 'cookies' | 'history' | 'storage' | 'all') => {
       if (scope === 'cache' || scope === 'all') {
         setPageCache({});
+        urlResponseCacheRef.current.clear();
       }
       if (scope === 'history' || scope === 'all') {
         setHistory([]);
@@ -957,6 +1558,17 @@ export default function App() {
     []
   );
 
+  const handleSyncNativeProfile = useCallback((profileId: string) => {
+    if (!isRustNativeShell()) return;
+    setSyncingProfileId(profileId);
+    requestRustImportProfile(profileId);
+  }, []);
+
+  const handleRescanProfiles = useCallback(() => {
+    if (!isRustNativeShell()) return;
+    requestRustDetectProfiles();
+  }, []);
+
   const renderTabContent = (tab: Tab, isSplitPane: boolean) => {
     const tabUrl = tab.url;
 
@@ -967,6 +1579,7 @@ export default function App() {
           limiter={limiter}
           totalRamMb={rustTelemetry?.ramMb ?? budget.totalRamMb}
           blockedTotal={blockedEvents.length}
+          detectedProfilesCount={detectedProfiles.length}
           onNavigate={(u) => navigateTab(tab.id, u)}
           onAddBookmark={(title, rawUrl) => {
             const normalized = normalizeAddressInput(rawUrl, searchEngine);
@@ -982,6 +1595,12 @@ export default function App() {
             ]);
           }}
           onOpenLimiter={() => setActiveDrawer('limiter')}
+          onQuickSync={() => {
+            if (isRustNativeShell() && detectedProfiles.length > 0) {
+              handleSyncNativeProfile('all');
+            }
+            navigateTab(tab.id, 'ferrox://settings');
+          }}
         />
       );
     }
@@ -1004,6 +1623,10 @@ export default function App() {
           hardwareAcceleration={privacyConfig.hardwareAcceleration}
           verticalTabs={verticalTabs}
           showBookmarksBar={showBookmarksBar}
+          detectedProfiles={detectedProfiles}
+          autoSyncBrowsers={autoSyncBrowsers}
+          syncingProfileId={syncingProfileId}
+          lastSyncSummary={lastSyncSummary}
           onChangeAccent={setAccent}
           onChangeCustomAccentHex={setCustomAccentHex}
           onChangeSurfaceTheme={setSurfaceTheme}
@@ -1013,6 +1636,9 @@ export default function App() {
           }
           onToggleVerticalTabs={() => setVerticalTabs((v) => !v)}
           onToggleBookmarksBar={() => setShowBookmarksBar((b) => !b)}
+          onToggleAutoSyncBrowsers={() => setAutoSyncBrowsers((a) => !a)}
+          onRescanProfiles={handleRescanProfiles}
+          onSyncProfile={handleSyncNativeProfile}
           onImportProfileData={handleImportProfileData}
           onClearHistory={() => setHistory([])}
           onResetDefaults={() => {
@@ -1080,6 +1706,8 @@ export default function App() {
           onRemoveDownload={(id) =>
             setDownloads((prev) => prev.filter((d) => d.id !== id))
           }
+          onOpenDownloadFile={(path) => rustOpenDownloadFile(path)}
+          onShowDownloadInFolder={(path) => rustShowDownloadInFolder(path)}
           onToggleExtension={(id) =>
             setExtensions((prev) =>
               prev.map((e) => (e.id === id ? { ...e, enabled: !e.enabled } : e))
@@ -1132,9 +1760,11 @@ export default function App() {
         readerMode={Boolean(readerModeTabs[tab.id])}
         translation={translatedTabs[tab.id] ?? null}
         extensions={extensions}
+        zoomFactor={tabZooms[tab.id] ?? 1}
         autofillSignal={
           autofillSignal && autofillSignal.tabId === tab.id ? autofillSignal : null
         }
+        findSignal={findSignal && findSignal.tabId === tab.id ? findSignal : null}
         onWakeTab={() => {
           if (isSplitPane) {
             setTabs((prev) =>
@@ -1146,8 +1776,14 @@ export default function App() {
             handleSelectTab(tab.id);
           }
         }}
-        onRetry={() => void fetchExternalUrl(tab.id, tab.url, { isPrivate: tab.isPrivate })}
+        onRetry={() =>
+          void fetchExternalUrl(tab.id, tab.url, {
+            isPrivate: tab.isPrivate,
+            forceReload: true,
+          })
+        }
         onNavigateUrl={(nextUrl) => navigateTab(tab.id, nextUrl)}
+        onOpenBackgroundTab={handleOpenBackgroundTab}
         onOpenSpeedDial={() => navigateTab(tab.id, 'ferrox://speed-dial')}
         onProceedUnsafe={() =>
           void fetchExternalUrl(tab.id, tab.url, {
@@ -1169,6 +1805,20 @@ export default function App() {
   const activePageData = activeTab ? pageCache[activeTab.id] : undefined;
   const isBookmarked = Boolean(activeTab && bookmarks.some((b) => b.url === activeTab.url));
   const pipTab = pipTabId ? budget.tabs.find((t) => t.id === pipTabId) ?? null : null;
+  const shelfDownload = downloadShelfId
+    ? downloads.find((d) => d.id === downloadShelfId) ?? null
+    : null;
+  const mountedExternalTabs = useMemo(
+    () =>
+      budget.tabs.filter(
+        (t) =>
+          !t.url.startsWith('ferrox://') &&
+          !t.hibernated &&
+          t.id !== splitTab?.id &&
+          (t.id === activeTab?.id || Boolean(pageCache[t.id]))
+      ),
+    [activeTab?.id, budget.tabs, pageCache, splitTab?.id]
+  );
 
   return (
     <div
@@ -1227,8 +1877,8 @@ export default function App() {
       <AddressToolbar
         currentUrl={activeTab?.url ?? 'ferrox://speed-dial'}
         isPrivateTab={Boolean(activeTab?.isPrivate)}
-        canBack={Boolean(activeTab && canGoBack(activeTab))}
-        canForward={Boolean(activeTab && canGoForward(activeTab))}
+        canBack={Boolean(activeTab && (canGoBack(activeTab) || (isRustNativeShell() && !activeTab.url.startsWith('ferrox://'))))}
+        canForward={Boolean(activeTab && (canGoForward(activeTab) || (isRustNativeShell() && !activeTab.url.startsWith('ferrox://'))))}
         isLoading={Boolean(activeTab && loadingTabs[activeTab.id])}
         isBookmarked={isBookmarked}
         showBookmarksBar={showBookmarksBar}
@@ -1249,6 +1899,9 @@ export default function App() {
         ramLimitMb={limiter.ramLimitMb}
         ramLimiterEnabled={limiter.ramEnabled}
         sitePermissions={sitePermissionsMap[activeOrigin] ?? DEFAULT_SITE_PERMISSIONS}
+        omniboxInputRef={omniboxInputRef}
+        zoomFactor={activeTab ? tabZooms[activeTab.id] ?? 1 : 1}
+        onResetZoom={() => handleAdjustZoom('reset')}
         onChangeSitePermission={(origin, key: keyof SitePermissions, val: PermissionValue) =>
           setSitePermissionsMap((prev) => ({
             ...prev,
@@ -1295,6 +1948,19 @@ export default function App() {
           onOpenManager={() => handleOpenHubSection('bookmarks')}
         />
       )}
+
+      {/* Slim Find-in-Page Bar (positioned above mainViewportRef so native WebView2 HWND shifts smoothly beneath it) */}
+      <FindInPageBar
+        open={findOpen}
+        query={findQuery}
+        onChangeQuery={(q) => {
+          setFindQuery(q);
+          handleFindStep(q, false);
+        }}
+        onFindNext={() => handleFindStep(findQuery, false)}
+        onFindPrev={() => handleFindStep(findQuery, true)}
+        onClose={handleCloseFind}
+      />
 
       {/* Main Browser Body: Minimal 5-icon Sidebar + Optional Vertical Tab Rail + Optional Drawer + Viewport / Split Viewport */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
@@ -1353,17 +2019,23 @@ export default function App() {
           privacyConfig={privacyConfig}
           onClose={() => setActiveDrawer(null)}
           onUpdateLimiter={setLimiter}
-          onHibernateInactive={() =>
+          onHibernateInactive={() => {
+            if (isRustNativeShell()) {
+              sendToRust('hibernate_inactive');
+            }
             setTabs((prev) =>
               prev.map((t) =>
                 t.id !== activeTab?.id && t.id !== splitTab?.id && !t.pinned
                   ? { ...t, hibernated: true, estimatedRamMb: 8, estimatedCpuPercent: 0 }
                   : t
               )
-            )
-          }
+            );
+          }}
           onHibernateTab={(tabId) => {
             if (tabId === activeTab?.id || tabId === splitTab?.id) return;
+            if (isRustNativeShell()) {
+              rustHibernateTab(tabId);
+            }
             setTabs((prev) =>
               prev.map((t) =>
                 t.id === tabId
@@ -1413,7 +2085,22 @@ export default function App() {
           className="flex flex-1 min-w-0 min-h-0 overflow-hidden"
           style={{ backgroundColor: 'var(--fx-bg)' }}
         >
-          {activeTab && (
+          {/* Keep live external tab viewports mounted (hidden when inactive) so scroll & DOM state stay cached across tab switches */}
+          {mountedExternalTabs.map((extTab) => (
+            <div
+              key={extTab.id}
+              className={
+                activeTab?.id === extTab.id
+                  ? 'flex-1 min-w-0 min-h-0 overflow-hidden'
+                  : 'hidden'
+              }
+            >
+              {renderTabContent(extTab, false)}
+            </div>
+          ))}
+
+          {/* Render internal ferrox:// views or hibernated external tab */}
+          {activeTab && (activeTab.url.startsWith('ferrox://') || activeTab.hibernated) && (
             <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
               {renderTabContent(activeTab, false)}
             </div>
@@ -1452,6 +2139,64 @@ export default function App() {
           )}
         </main>
       </div>
+
+      {/* Slim Native Download Shelf (outside mainViewportRef so WebView2 resizes cleanly above it) */}
+      {shelfDownload && (
+        <div
+          className="flex items-center justify-between gap-3 h-9 px-4 border-t border-white/10 shrink-0 text-xs"
+          style={{ backgroundColor: 'var(--fx-panel)' }}
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <DownloadIcon className="w-3.5 h-3.5 text-emerald-400 shrink-0" aria-hidden="true" />
+            <span className="font-semibold text-white truncate">{shelfDownload.filename}</span>
+            <span className="font-mono-tabular text-[11px] text-slate-400 shrink-0">
+              {shelfDownload.status === 'downloading'
+                ? 'Downloading...'
+                : shelfDownload.status === 'completed'
+                ? 'Completed'
+                : 'Flagged'}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {shelfDownload.status === 'completed' && shelfDownload.savedPath && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => rustOpenDownloadFile(shelfDownload.savedPath!)}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white/10 hover:bg-white/18 text-[11px] text-white"
+                >
+                  <ExternalLink className="w-3 h-3" /> Open
+                </button>
+                <button
+                  type="button"
+                  onClick={() => rustShowDownloadInFolder(shelfDownload.savedPath!)}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white/8 hover:bg-white/14 text-[11px] text-slate-200"
+                >
+                  <FolderOpen className="w-3 h-3" /> Show in Folder
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setDownloadShelfId(null);
+                handleOpenHubSection('downloads');
+              }}
+              className="px-2 py-1 rounded bg-white/6 hover:bg-white/12 text-[11px] text-slate-300 hover:text-white"
+            >
+              All Downloads
+            </button>
+            <button
+              type="button"
+              onClick={() => setDownloadShelfId(null)}
+              aria-label="Dismiss download bar"
+              className="p-1 text-slate-400 hover:text-white rounded"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Tab Search Modal (Ctrl+K) */}
       <TabSearchModal

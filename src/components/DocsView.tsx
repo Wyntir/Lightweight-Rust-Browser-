@@ -62,11 +62,39 @@ export function DocsView({ onOpenRustSource }: DocsViewProps) {
             </div>
             <div className="flex items-center justify-between px-4 py-3 text-xs">
               <span className="font-mono-tabular text-white">ferrox://docs</span>
-              <span className="text-slate-400">Architecture guide and module mapping</span>
+              <span className="text-slate-400">Architecture guide and keyboard shortcuts</span>
             </div>
+          </div>
+        </section>
+
+        <section className="space-y-3 pt-4 border-t border-white/8">
+          <h2 className="font-display text-base font-semibold text-white">
+            04. Keyboard Shortcuts & Link Controls
+          </h2>
+          <div className="divide-y divide-white/8 border border-white/8 rounded-xl bg-[#12151E]">
+            {[
+              ['Ctrl + T', 'Open a new tab'],
+              ['Ctrl + W', 'Close current tab'],
+              ['Ctrl + Shift + T', 'Reopen last closed tab'],
+              ['Ctrl + Tab / Ctrl + Shift + Tab', 'Switch to next / previous tab'],
+              ['Ctrl + L / Alt + D', 'Focus and select address bar'],
+              ['Ctrl + R / F5', 'Reload active tab'],
+              ['Alt + Left / Alt + Right', 'Navigate back / forward'],
+              ['Ctrl + F', 'Find in page'],
+              ['Ctrl + + / Ctrl + - / Ctrl + 0', 'Zoom in, zoom out, or reset to 100%'],
+              ['F11', 'Toggle borderless fullscreen'],
+              ['Ctrl + K', 'Quick tab search across workspaces'],
+              ['Middle-Click / Ctrl + Click', 'Open link in a new background tab'],
+            ].map(([keys, desc]) => (
+              <div key={keys} className="flex items-center justify-between px-4 py-2.5 text-xs">
+                <span className="font-mono-tabular text-white">{keys}</span>
+                <span className="text-slate-400">{desc}</span>
+              </div>
+            ))}
           </div>
         </section>
       </div>
     </div>
   );
 }
+

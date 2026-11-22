@@ -140,7 +140,13 @@ test('shouldBlockUrl matches tracker domains and respects toggle', () => {
   });
 });
 
-import { hexToRgbaSoft } from './browserEngine';
+import {
+  clampZoomFactor,
+  getNextTabId,
+  hexToRgbaSoft,
+  restoreSessionTabs,
+  serializeSessionTabs,
+} from './browserEngine';
 import { getSampleProfileData, parseBrowserPasswordsCsv, parseProfilePayload } from './profileImporter';
 
 test('vaultCrypto encrypts and decrypts credentials with AES-GCM without storing plaintext', async () => {
@@ -188,4 +194,53 @@ test('hexToRgbaSoft converts hex accent colors and falls back safely', () => {
   assert.equal(hexToRgbaSoft('#38BDF8', 0.2), 'rgba(56, 189, 248, 0.2)');
   assert.equal(hexToRgbaSoft('invalid', 0.14), 'rgba(250, 30, 78, 0.14)');
 });
+
+test('clampZoomFactor clamps zoom between 50% and 250% cleanly', () => {
+  assert.equal(clampZoomFactor(1.1000000000000001), 1.1);
+  assert.equal(clampZoomFactor(0.1), 0.5);
+  assert.equal(clampZoomFactor(4.2), 2.5);
+  assert.equal(clampZoomFactor(Number.NaN), 1);
+});
+
+test('getNextTabId cycles forward and backward across workspace tabs', () => {
+  const tabs = [
+    createTab('tab-1', 'personal', 'ferrox://speed-dial'),
+    createTab('tab-2', 'personal', 'https://example.com'),
+    createTab('tab-3', 'personal', 'https://docs.rs'),
+  ];
+  assert.equal(getNextTabId(tabs, 'tab-1', 1), 'tab-2');
+  assert.equal(getNextTabId(tabs, 'tab-3', 1), 'tab-1');
+  assert.equal(getNextTabId(tabs, 'tab-1', -1), 'tab-3');
+  assert.equal(getNextTabId([], 'tab-1', 1), null);
+});
+
+test('serializeSessionTabs and restoreSessionTabs exclude private tabs and sanitize invalid entries', () => {
+  const normal = tabHistoryNavigate(
+    createTab('tab-1', 'personal', 'ferrox://speed-dial', 1000),
+    'https://www.rust-lang.org',
+    'Rust',
+    2000
+  );
+  const pinnedWork = {
+    ...createTab('tab-2', 'work', 'https://docs.rs', 1500),
+    pinned: true,
+  };
+  const priv = createTab('tab-3', 'personal', 'https://secret.example', 1800, { isPrivate: true });
+
+  const serialized = serializeSessionTabs([normal, pinnedWork, priv]);
+  assert.equal(serialized.length, 2);
+  assert.equal(serialized.some((t) => t.id === 'tab-3'), false);
+
+  const restored = restoreSessionTabs([
+    ...serialized,
+    { id: 'bad-scheme', url: 'javascript:alert(1)', workspace: 'personal' },
+    { id: 'tab-1', url: 'https://duplicate.example', workspace: 'personal' },
+  ]);
+  assert.equal(restored.length, 2);
+  assert.equal(restored[0].url, 'https://www.rust-lang.org');
+  assert.equal(restored[0].history.length, 2);
+  assert.equal(restored[1].workspace, 'work');
+  assert.equal(restored[1].pinned, true);
+});
+
 

@@ -10,10 +10,13 @@ interface RustFileEntry {
 }
 
 const NATIVE_CRATE_MODULES = [
-  { path: 'src/main.rs', desc: 'Dual-WebView desktop host (wry + tao), custom protocol UI, dark DWM chrome & IPC router' },
+  { path: 'build.rs', desc: 'Embeds multi-size Windows .ico icon, PerMonitorV2 manifest & PE VersionInfo metadata' },
+  { path: 'sign-windows.ps1', desc: 'Authenticode SHA-256 signing script (CA PFX or local trusted publisher cert)' },
+  { path: 'src/main.rs', desc: 'Dual-WebView desktop host (wry + tao), taskbar icon, cached bounds, same-window popup handler & IPC router' },
+  { path: 'src/importer.rs', desc: 'Instant Opera GX, Opera & Mozilla Firefox profile scanner and SQLite/JSON importer' },
   { path: 'src/ui_assets.rs', desc: 'Embedded React + Tailwind + asset bundle served via ferrox:// custom protocol' },
   { path: 'src/browser.rs', desc: 'Persistent config.json store, omnibox normalizer & bookmarks' },
-  { path: 'src/limiter.rs', desc: 'Live sysinfo process RAM/CPU sampling & auto-hibernation engine' },
+  { path: 'src/limiter.rs', desc: 'Lightweight sysinfo RAM/CPU sampling & auto-hibernation engine' },
   { path: 'src/tabs.rs', desc: 'Workspace isolation, tab pins, back/forward stacks & hibernation' },
   { path: 'src/adblock.rs', desc: 'Host matcher + WebView2 cosmetic element-hiding init script' },
   { path: 'src/security.rs', desc: 'HTTPS-Only upgrade & Safe Browsing malicious URL screening' },

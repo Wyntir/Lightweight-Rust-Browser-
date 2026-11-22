@@ -9,9 +9,11 @@ pub fn resolve_ui_asset(raw_path: &str) -> (&'static [u8], &'static str) {
         .trim_start_matches('/');
     match clean {
         "" | "index.html" => (include_bytes!("ui/index.html"), "text/html; charset=utf-8"),
+        "assets/ferrox_logo_icon.png" => (include_bytes!("ui/assets/ferrox_logo_icon.png"), "image/png"),
         "assets/speed_dial_backdrop_1795363253714.jpg" => (include_bytes!("ui/assets/speed_dial_backdrop_1795363253714.jpg"), "image/jpeg"),
         "bundle.css" => (include_bytes!("ui/bundle.css"), "text/css; charset=utf-8"),
         "bundle.js" => (include_bytes!("ui/bundle.js"), "application/javascript; charset=utf-8"),
+        "favicon.png" => (include_bytes!("ui/favicon.png"), "image/png"),
         _ => (include_bytes!("ui/index.html"), "text/html; charset=utf-8"),
     }
 }

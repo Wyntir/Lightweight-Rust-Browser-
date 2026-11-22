@@ -107,11 +107,18 @@ async function main() {
     throw new Error(`Expected bundle.js in ${uiOutDir}, found: ${emittedFiles.join(', ')}`);
   }
 
+  const faviconSrc = path.resolve(rootDir, 'public/favicon.png');
+  const hasFavicon = fs.existsSync(faviconSrc);
+  if (hasFavicon) {
+    fs.copyFileSync(faviconSrc, path.join(uiOutDir, 'favicon.png'));
+  }
+
   const indexHtml = `<!doctype html>
 <html lang="en" class="dark" style="color-scheme: dark;">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    ${hasFavicon ? '<link rel="icon" type="image/png" href="./favicon.png" />' : ''}
     <title>FerroX Browser</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

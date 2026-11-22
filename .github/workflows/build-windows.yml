@@ -18,11 +18,33 @@ jobs:
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build release binary
+      - name: Build release binary (with embedded icon, manifest & PE metadata)
         run: cargo build --release
+
+      - name: Authenticode sign ferrox-browser.exe (when PFX secret is configured)
+        if: ${{ secrets.WINDOWS_CERT_PFX_BASE64 != '' }}
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "ferrox-codesign.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+          $env:FERROX_SIGN_PFX = $pfxPath
+          $env:FERROX_SIGN_PASSWORD = $env:WINDOWS_CERT_PASSWORD
+          ./sign-windows.ps1 -ExePath "target/release/ferrox-browser.exe"
+          Remove-Item $pfxPath -Force
+
+      - name: Generate SHA-256 checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 -Path "target/release/ferrox-browser.exe").Hash.ToLower()
+          "$hash  ferrox-browser.exe" | Out-File -Encoding ascii -FilePath "target/release/ferrox-browser.exe.sha256"
 
       - name: Upload ferrox-browser.exe artifact
         uses: actions/upload-artifact@v4
         with:
           name: ferrox-browser-windows-x86_64
-          path: rust-browser/target/release/ferrox-browser.exe
+          path: |
+            rust-browser/target/release/ferrox-browser.exe
+            rust-browser/target/release/ferrox-browser.exe.sha256

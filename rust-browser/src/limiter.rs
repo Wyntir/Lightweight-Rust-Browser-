@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LimiterConfig {
@@ -79,7 +79,8 @@ impl ResourceLimiter {
     pub fn new(config: LimiterConfig) -> Self {
         let mut system = System::new();
         let pid = Pid::from_u32(std::process::id());
-        system.refresh_processes(ProcessesToUpdate::All, true);
+        let kind = ProcessRefreshKind::nothing().with_memory().with_cpu();
+        system.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
         Self {
             config,
             snapshot: TelemetrySnapshot::default(),
@@ -89,7 +90,9 @@ impl ResourceLimiter {
     }
 
     pub fn sample_process_metrics(&mut self) {
-        self.system.refresh_processes(ProcessesToUpdate::All, true);
+        let kind = ProcessRefreshKind::nothing().with_memory().with_cpu();
+        self.system
+            .refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
 
         let mut ram_bytes: u64 = 0;
         let mut cpu_total: f32 = 0.0;

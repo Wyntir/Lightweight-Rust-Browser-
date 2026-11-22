@@ -185,6 +185,7 @@ export interface DownloadItem {
   id: string;
   filename: string;
   url: string;
+  savedPath?: string;
   bytesReceived: number;
   totalBytes: number;
   status: DownloadStatus;
@@ -329,9 +330,12 @@ export const DEFAULT_BOOKMARKS: BookmarkItem[] = [
 export const DEFAULT_TRACKER_RULES: string[] = [
   'doubleclick.net',
   'googlesyndication.com',
+  'googleadservices.com',
   'google-analytics.com',
   'googletagmanager.com',
   'adservice.google.com',
+  'pagead2.googlesyndication.com',
+  'static.doubleclick.net',
   'connect.facebook.net',
   'scorecardresearch.com',
   'mixpanel.com',
@@ -794,3 +798,102 @@ export function parseBookmarksImport(rawText: string): BookmarkItem[] {
   }
   return results;
 }
+
+export function clampZoomFactor(factor: number): number {
+  if (!Number.isFinite(factor)) return 1;
+  const clamped = Math.min(2.5, Math.max(0.5, factor));
+  return Math.round(clamped * 100) / 100;
+}
+
+export function getNextTabId(tabs: Tab[], activeId: string | null, delta: 1 | -1): string | null {
+  if (tabs.length === 0) return null;
+  if (!activeId) return tabs[0].id;
+  const idx = tabs.findIndex((t) => t.id === activeId);
+  if (idx === -1) return tabs[0].id;
+  const nextIdx = (idx + delta + tabs.length) % tabs.length;
+  return tabs[nextIdx].id;
+}
+
+export interface PersistedSessionTab {
+  id: string;
+  workspace: WorkspaceId;
+  groupId: string | null;
+  title: string;
+  url: string;
+  history: string[];
+  historyIndex: number;
+  pinned: boolean;
+}
+
+const VALID_WORKSPACES: ReadonlySet<string> = new Set(['personal', 'work', 'gaming', 'development']);
+
+export function serializeSessionTabs(tabs: Tab[]): PersistedSessionTab[] {
+  return tabs
+    .filter((t) => !t.isPrivate)
+    .slice(0, 50)
+    .map((t) => ({
+      id: t.id,
+      workspace: t.workspace,
+      groupId: t.groupId,
+      title: t.title,
+      url: t.url,
+      history: t.history.slice(-20),
+      historyIndex: Math.min(t.historyIndex, Math.max(0, t.history.slice(-20).length - 1)),
+      pinned: t.pinned,
+    }));
+}
+
+export function restoreSessionTabs(raw: unknown, now: number = Date.now()): Tab[] {
+  if (!Array.isArray(raw)) return [];
+  const restored: Tab[] = [];
+  const seenIds = new Set<string>();
+
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Partial<PersistedSessionTab>;
+    const id = typeof rec.id === 'string' && rec.id.trim() ? rec.id.trim() : '';
+    const url = typeof rec.url === 'string' && rec.url.trim() ? rec.url.trim() : '';
+    if (!id || !url || seenIds.has(id)) continue;
+    const isValidScheme =
+      url.startsWith('http://') || url.startsWith('https://') || url in INTERNAL_PAGES;
+    if (!isValidScheme) continue;
+
+    seenIds.add(id);
+    const workspace: WorkspaceId =
+      typeof rec.workspace === 'string' && VALID_WORKSPACES.has(rec.workspace)
+        ? (rec.workspace as WorkspaceId)
+        : 'personal';
+    const cleanHistory =
+      Array.isArray(rec.history) && rec.history.length > 0
+        ? rec.history.filter(
+            (h): h is string =>
+              typeof h === 'string' &&
+              (h.startsWith('http://') || h.startsWith('https://') || h in INTERNAL_PAGES)
+          )
+        : [url];
+    const history = cleanHistory.length > 0 ? cleanHistory : [url];
+    const rawIdx = typeof rec.historyIndex === 'number' ? rec.historyIndex : history.length - 1;
+    const historyIndex = Math.max(0, Math.min(history.length - 1, Math.floor(rawIdx)));
+
+    restored.push({
+      id,
+      workspace,
+      groupId: typeof rec.groupId === 'string' ? rec.groupId : null,
+      title:
+        typeof rec.title === 'string' && rec.title.trim()
+          ? rec.title.trim()
+          : deriveTitleFromUrl(url),
+      url,
+      history,
+      historyIndex,
+      pinned: Boolean(rec.pinned),
+      hibernated: false,
+      isPrivate: false,
+      estimatedRamMb: estimateTabMemoryMb(url, false),
+      estimatedCpuPercent: estimateTabCpuPercent(url, false, false),
+      lastActiveAt: now,
+    });
+  }
+  return restored;
+}
+

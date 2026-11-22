@@ -12,9 +12,12 @@ const RUST_CRATE_DIR = path.resolve(process.cwd(), 'rust-browser');
 const DEFAULT_TRACKER_DOMAINS = [
   'doubleclick.net',
   'googlesyndication.com',
+  'googleadservices.com',
   'google-analytics.com',
   'googletagmanager.com',
   'adservice.google.com',
+  'pagead2.googlesyndication.com',
+  'static.doubleclick.net',
   'connect.facebook.net',
   'scorecardresearch.com',
   'mixpanel.com',
@@ -182,6 +185,11 @@ function sanitizeAndRewriteHtml(
     }
   );
 
+  cleaned = cleaned.replace(
+    /\btarget\s*=\s*(?:"(?:_blank|_new|blank)"|'(?:_blank|_new|blank)'|(?:_blank|_new))/gi,
+    'target="_self"'
+  );
+
   const fingerprintScript = fingerprintProtection
     ? `try { Object.defineProperty(navigator, 'hardwareConcurrency', { get: function() { return 4; } }); Object.defineProperty(navigator, 'deviceMemory', { get: function() { return 4; } }); } catch(_e) {}`
     : '';
@@ -189,17 +197,68 @@ function sanitizeAndRewriteHtml(
   const bridgeScript = `
 <script>
 ${fingerprintScript}
+try {
+  window.open = function(url) {
+    if (typeof url === 'string' && url.trim() && url !== 'about:blank') {
+      try {
+        var resolved = new URL(url, ${JSON.stringify(baseUrl)}).href;
+        if (resolved.startsWith('http://') || resolved.startsWith('https://')) {
+          window.parent.postMessage({ type: 'ferrox:navigate', url: resolved }, '*');
+          return window;
+        }
+      } catch (_e) {}
+    }
+    return null;
+  };
+  if (window.HTMLAnchorElement && HTMLAnchorElement.prototype && HTMLAnchorElement.prototype.click) {
+    var origAnchorClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function() {
+      try {
+        var tgt = (this.getAttribute('target') || '').toLowerCase();
+        if (tgt && tgt !== '_self' && tgt !== '_parent' && tgt !== '_top') {
+          this.setAttribute('target', '_self');
+        }
+      } catch (_e) {}
+      return origAnchorClick.apply(this, arguments);
+    };
+  }
+} catch (_e) {}
+document.addEventListener('mousedown', function(ev) {
+  if (ev.button === 1 && ev.target && ev.target.closest && ev.target.closest('a[href]')) {
+    ev.preventDefault();
+  }
+}, true);
+document.addEventListener('auxclick', function(ev) {
+  if (ev.button !== 1) return;
+  var a = ev.target && ev.target.closest ? ev.target.closest('a[href]') : null;
+  if (!a) return;
+  var href = a.href || a.getAttribute('href');
+  if (!href || href.startsWith('#')) return;
+  ev.preventDefault();
+  window.parent.postMessage({ type: 'ferrox:open-bg-tab', url: href }, '*');
+}, true);
 document.addEventListener('click', function(ev) {
   var a = ev.target && ev.target.closest ? ev.target.closest('a[href]') : null;
   if (!a) return;
   var href = a.getAttribute('href');
   if (!href || href.startsWith('#')) return;
   ev.preventDefault();
-  window.parent.postMessage({ type: 'ferrox:navigate', url: a.href || href }, '*');
+  if (ev.ctrlKey || ev.metaKey) {
+    window.parent.postMessage({ type: 'ferrox:open-bg-tab', url: a.href || href }, '*');
+  } else {
+    window.parent.postMessage({ type: 'ferrox:navigate', url: a.href || href }, '*');
+  }
 }, true);
 document.addEventListener('submit', function(ev) {
   var form = ev.target;
-  if (!form || !form.action) return;
+  if (!form) return;
+  if (form.getAttribute) {
+    var tgt = (form.getAttribute('target') || '').toLowerCase();
+    if (tgt === '_blank' || tgt === '_new') {
+      form.setAttribute('target', '_self');
+    }
+  }
+  if (!form.action) return;
   var input = form.querySelector('input[name="q"], input[name="search"], input[type="search"], input[type="text"]');
   if (input && input.value) {
     ev.preventDefault();
@@ -209,14 +268,25 @@ document.addEventListener('submit', function(ev) {
     } else {
       window.parent.postMessage({ type: 'ferrox:navigate', url: input.value }, '*');
     }
+  } else if (form.action && (form.action.startsWith('http://') || form.action.startsWith('https://'))) {
+    ev.preventDefault();
+    window.parent.postMessage({ type: 'ferrox:navigate', url: form.action }, '*');
   }
 }, true);
 window.addEventListener('message', function(ev) {
-  if (!ev.data || ev.data.type !== 'ferrox:autofill') return;
-  var userField = document.querySelector('input[type="email"], input[name*="user"], input[name*="email"], input[type="text"]');
-  var passField = document.querySelector('input[type="password"]');
-  if (userField && ev.data.username) userField.value = ev.data.username;
-  if (passField && ev.data.password) passField.value = ev.data.password;
+  if (!ev.data || typeof ev.data !== 'object') return;
+  if (ev.data.type === 'ferrox:autofill') {
+    var userField = document.querySelector('input[type="email"], input[name*="user"], input[name*="email"], input[type="text"]');
+    var passField = document.querySelector('input[type="password"]');
+    if (userField && ev.data.username) userField.value = ev.data.username;
+    if (passField && ev.data.password) passField.value = ev.data.password;
+  } else if (ev.data.type === 'ferrox:find' && typeof ev.data.query === 'string') {
+    if (ev.data.query.trim()) {
+      window.find(ev.data.query, false, Boolean(ev.data.backwards), true, false, true, false);
+    } else if (window.getSelection) {
+      window.getSelection().removeAllRanges();
+    }
+  }
 });
 </script>`;
 
@@ -246,7 +316,16 @@ window.addEventListener('message', function(ev) {
   };
 }
 
-const BINARY_ASSET_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.ico', '.woff', '.woff2']);
+const BINARY_ASSET_EXTENSIONS = new Set([
+  '.jpg',
+  '.jpeg',
+  '.png',
+  '.webp',
+  '.ico',
+  '.rgba',
+  '.woff',
+  '.woff2',
+]);
 
 function collectRustFiles(
   dir: string,
@@ -278,12 +357,14 @@ function collectRustFiles(
           ? 'toml'
           : ext === '.md'
           ? 'markdown'
-          : ext === '.html'
+          : ext === '.html' || ext === '.manifest' || ext === '.xml'
           ? 'html'
           : ext === '.css'
           ? 'css'
           : ext === '.js'
           ? 'javascript'
+          : ext === '.ps1' || ext === '.bat'
+          ? 'shell'
           : 'text';
       results.push({
         path: relPath,

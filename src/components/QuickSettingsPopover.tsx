@@ -45,7 +45,7 @@ export function QuickSettingsPopover({
 
   return (
     <div
-      className="fixed right-3 top-12 z-50 w-80 rounded-xl border border-white/15 shadow-2xl p-4 space-y-4"
+      className="fx-pop-in fixed right-3 top-12 z-50 w-80 rounded-xl border border-white/15 shadow-2xl p-4 space-y-4"
       style={{ backgroundColor: 'var(--fx-panel)' }}
       role="dialog"
       aria-label="Quick browser settings"

@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -11,11 +12,11 @@ import {
   Search,
   Settings,
   Shield,
-  Sparkles,
   Terminal,
   X,
 } from 'lucide-react';
 import { Tab, TabGroup } from '../lib/browserEngine';
+import ferroxLogo from '../assets/images/ferrox_logo_icon.png';
 
 interface TabBarSharedProps {
   tabs: Tab[];
@@ -44,7 +45,15 @@ function getTabIcon(tab: Tab) {
     return <PauseCircle className="w-3.5 h-3.5 text-slate-400 shrink-0" aria-hidden="true" />;
   }
   if (tab.url === 'ferrox://speed-dial') {
-    return <Sparkles className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--fx-accent)' }} aria-hidden="true" />;
+    return (
+      <img
+        src={ferroxLogo}
+        alt=""
+        referrerPolicy="no-referrer"
+        className="w-3.5 h-3.5 rounded-[3px] object-cover shrink-0"
+        aria-hidden="true"
+      />
+    );
   }
   if (tab.url === 'ferrox://rust-source') {
     return <Terminal className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--fx-accent)' }} aria-hidden="true" />;
@@ -59,7 +68,7 @@ function sortTabsPinnedFirst(tabs: Tab[]): Tab[] {
   return [...tabs].sort((a, b) => Number(b.pinned) - Number(a.pinned));
 }
 
-export function TabStrip({
+export const TabStrip = memo(function TabStrip({
   tabs,
   tabGroups,
   activeTabId,
@@ -331,9 +340,9 @@ export function TabStrip({
       </div>
     </div>
   );
-}
+});
 
-export function VerticalTabRail({
+export const VerticalTabRail = memo(function VerticalTabRail({
   tabs,
   tabGroups,
   activeTabId,
@@ -471,4 +480,4 @@ export function VerticalTabRail({
       </div>
     </aside>
   );
-}
+});

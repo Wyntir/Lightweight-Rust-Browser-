@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, RefObject, useEffect, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
@@ -61,6 +61,9 @@ interface AddressToolbarProps {
   onOpenShield: () => void;
   onOpenLimiter: () => void;
   onPopoverOpenChange?: (open: boolean) => void;
+  omniboxInputRef?: RefObject<HTMLInputElement | null>;
+  zoomFactor?: number;
+  onResetZoom?: () => void;
 }
 
 const TRANSLATE_LANGUAGES = ['Spanish', 'French', 'German', 'Japanese', 'Portuguese'];
@@ -104,6 +107,9 @@ export function AddressToolbar({
   onOpenShield,
   onOpenLimiter,
   onPopoverOpenChange,
+  omniboxInputRef,
+  zoomFactor = 1,
+  onResetZoom,
 }: AddressToolbarProps) {
   const [draft, setDraft] = useState(
     currentUrl === 'ferrox://speed-dial' ? '' : currentUrl
@@ -203,6 +209,7 @@ export function AddressToolbar({
             )}
 
             <input
+              ref={omniboxInputRef}
               id="ferrox-omnibox"
               type="text"
               value={draft}
@@ -211,6 +218,18 @@ export function AddressToolbar({
               placeholder="Search the web or enter URL (e.g. rust-lang.org)"
               className="w-full bg-transparent text-xs md:text-sm font-mono-tabular text-slate-100 placeholder:text-slate-500 focus:outline-none"
             />
+
+            {Math.round(zoomFactor * 100) !== 100 && onResetZoom && (
+              <button
+                type="button"
+                onClick={onResetZoom}
+                aria-label="Reset page zoom to 100%"
+                title="Click to reset zoom (Ctrl+0)"
+                className="px-1.5 py-0.5 rounded bg-white/10 hover:bg-white/18 text-[10px] font-mono-tabular text-slate-200 shrink-0 transition-colors"
+              >
+                {Math.round(zoomFactor * 100)}%
+              </button>
+            )}
 
             {!isInternal && (
               <>

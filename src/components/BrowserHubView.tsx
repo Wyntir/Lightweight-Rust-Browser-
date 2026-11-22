@@ -58,6 +58,8 @@ interface BrowserHubViewProps {
   onAddDownload: (filename: string, url: string) => void;
   onTogglePauseDownload: (id: string) => void;
   onRemoveDownload: (id: string) => void;
+  onOpenDownloadFile?: (path: string) => void;
+  onShowDownloadInFolder?: (path: string) => void;
   onToggleExtension: (id: string) => void;
   onAddExtension: (ext: Omit<BrowserExtension, 'id'>) => void;
   onRemoveExtension: (id: string) => void;
@@ -87,6 +89,8 @@ export function BrowserHubView({
   onAddDownload,
   onTogglePauseDownload,
   onRemoveDownload,
+  onOpenDownloadFile,
+  onShowDownloadInFolder,
   onToggleExtension,
   onAddExtension,
   onRemoveExtension,
@@ -593,7 +597,7 @@ export function BrowserHubView({
                             </span>
                           </div>
                           <div className="font-mono-tabular text-[11px] text-slate-500 truncate">
-                            {dl.url}
+                            {dl.savedPath ? dl.savedPath : dl.url}
                           </div>
                         </div>
 
@@ -617,21 +621,40 @@ export function BrowserHubView({
                           ) : null}
 
                           {dl.status === 'completed' && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (dl.url.startsWith('/api/')) {
-                                  window.location.href = dl.url;
-                                } else {
-                                  setOpenedDownloadNotice(
-                                    `Opened ${dl.filename} from sandboxed downloads folder.`
-                                  );
-                                }
-                              }}
-                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white/10 hover:bg-white/16 text-xs text-white"
-                            >
-                              <FolderOpen className="w-3 h-3" /> Open
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (dl.savedPath && onOpenDownloadFile) {
+                                    onOpenDownloadFile(dl.savedPath);
+                                    setOpenedDownloadNotice(`Opening ${dl.filename}...`);
+                                  } else if (dl.url.startsWith('/api/')) {
+                                    window.location.href = dl.url;
+                                  } else {
+                                    setOpenedDownloadNotice(
+                                      `Opened ${dl.filename} from downloads folder.`
+                                    );
+                                  }
+                                }}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white/10 hover:bg-white/16 text-xs text-white"
+                              >
+                                <ExternalLink className="w-3 h-3" /> Open
+                              </button>
+                              {dl.savedPath && onShowDownloadInFolder && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    onShowDownloadInFolder(dl.savedPath!);
+                                    setOpenedDownloadNotice(
+                                      `Revealed ${dl.filename} in folder.`
+                                    );
+                                  }}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white/8 hover:bg-white/14 text-xs text-slate-200"
+                                >
+                                  <FolderOpen className="w-3 h-3" /> Show in Folder
+                                </button>
+                              )}
+                            </>
                           )}
 
                           <button

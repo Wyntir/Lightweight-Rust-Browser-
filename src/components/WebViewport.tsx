@@ -49,10 +49,13 @@ interface WebViewportProps {
   readerMode: boolean;
   translation: TranslationData | null;
   extensions: BrowserExtension[];
+  zoomFactor?: number;
   autofillSignal?: { seq: number; username: string; password: string } | null;
+  findSignal?: { seq: number; query: string; backwards: boolean } | null;
   onWakeTab: () => void;
   onRetry: () => void;
   onNavigateUrl: (url: string) => void;
+  onOpenBackgroundTab?: (url: string) => void;
   onOpenSpeedDial: () => void;
   onProceedUnsafe: () => void;
   onExitReaderMode: () => void;
@@ -68,10 +71,13 @@ export function WebViewport({
   readerMode,
   translation,
   extensions,
+  zoomFactor = 1,
   autofillSignal,
+  findSignal,
   onWakeTab,
   onRetry,
   onNavigateUrl,
+  onOpenBackgroundTab,
   onOpenSpeedDial,
   onProceedUnsafe,
   onExitReaderMode,
@@ -80,24 +86,30 @@ export function WebViewport({
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [readerFontSize, setReaderFontSize] = useState<'base' | 'lg'>('base');
 
-  // Listen for intercepted link clicks from sandboxed iframe
+  // Listen for intercepted link clicks strictly from THIS tab's sandboxed iframe
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
-      if (
-        event.data &&
-        typeof event.data === 'object' &&
-        event.data.type === 'ferrox:navigate' &&
-        typeof event.data.url === 'string'
-      ) {
-        const nextUrl = event.data.url;
-        if (nextUrl.startsWith('http://') || nextUrl.startsWith('https://')) {
+      if (!iframeRef.current?.contentWindow || event.source !== iframeRef.current.contentWindow) {
+        return;
+      }
+      if (!event.data || typeof event.data !== 'object') return;
+      const nextUrl = event.data.url;
+      if (typeof nextUrl !== 'string') return;
+      if (!nextUrl.startsWith('http://') && !nextUrl.startsWith('https://')) return;
+
+      if (event.data.type === 'ferrox:navigate') {
+        onNavigateUrl(nextUrl);
+      } else if (event.data.type === 'ferrox:open-bg-tab') {
+        if (onOpenBackgroundTab) {
+          onOpenBackgroundTab(nextUrl);
+        } else {
           onNavigateUrl(nextUrl);
         }
       }
     };
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [onNavigateUrl]);
+  }, [onNavigateUrl, onOpenBackgroundTab]);
 
   // Forward autofill credentials to iframe document when requested
   useEffect(() => {
@@ -111,6 +123,19 @@ export function WebViewport({
       '*'
     );
   }, [autofillSignal]);
+
+  // Forward Find-in-Page requests to iframe document when requested
+  useEffect(() => {
+    if (!findSignal || !iframeRef.current?.contentWindow) return;
+    iframeRef.current.contentWindow.postMessage(
+      {
+        type: 'ferrox:find',
+        query: findSignal.query,
+        backwards: findSignal.backwards,
+      },
+      '*'
+    );
+  }, [findSignal]);
 
   // Inject enabled extensions' CSS into the sandboxed srcDoc
   const augmentedHtml = useMemo(() => {
@@ -377,13 +402,24 @@ export function WebViewport({
       </div>
 
       {/* Sandboxed Viewport */}
-      <iframe
-        ref={iframeRef}
-        sandbox="allow-scripts"
-        srcDoc={augmentedHtml}
-        title={pageData.title || pageData.finalUrl}
-        className="flex-1 w-full bg-white border-0"
-      />
+      <div className="flex-1 w-full overflow-hidden bg-white">
+        <iframe
+          ref={iframeRef}
+          sandbox="allow-scripts"
+          srcDoc={augmentedHtml}
+          title={pageData.title || pageData.finalUrl}
+          className="w-full h-full bg-white border-0 origin-top-left"
+          style={
+            zoomFactor !== 1
+              ? {
+                  transform: `scale(${zoomFactor})`,
+                  width: `${100 / zoomFactor}%`,
+                  height: `${100 / zoomFactor}%`,
+                }
+              : undefined
+          }
+        />
+      </div>
     </div>
   );
 }

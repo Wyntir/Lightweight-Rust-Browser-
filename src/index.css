@@ -9,6 +9,7 @@
   --fx-chrome: #0E1118;
   --fx-panel: #12151E;
   --fx-card: #161B26;
+  --fx-ease: cubic-bezier(0.16, 1, 0.3, 1);
   --fx-font-display: "Outfit", system-ui, sans-serif;
   --fx-font-sans: "Plus Jakarta Sans", system-ui, sans-serif;
   --fx-font-mono: "JetBrains Mono", ui-monospace, monospace;
@@ -19,6 +20,7 @@ body {
   background-color: var(--fx-bg);
   color: #ECEFF4;
   margin: 0;
+  overscroll-behavior: none;
 }
 
 select,
@@ -34,6 +36,79 @@ select option {
 .font-mono-tabular {
   font-family: var(--fx-font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+.fx-scroll {
+  scroll-behavior: smooth;
+  overscroll-behavior: contain;
+  contain: layout style;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+@keyframes fx-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes fx-drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.fx-pop-in {
+  animation: fx-pop-in 150ms var(--fx-ease) both;
+}
+
+.fx-drawer-in {
+  animation: fx-drawer-in 160ms var(--fx-ease) both;
+}
+
+.fx-tile {
+  transition: transform 160ms var(--fx-ease), border-color 160ms ease, background-color 160ms ease;
+  will-change: transform;
+}
+
+.fx-tile:hover {
+  transform: translateY(-2px);
+}
+
+.fx-tile:active {
+  transform: translateY(0) scale(0.99);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fx-scroll {
+    scroll-behavior: auto;
+  }
+  .fx-pop-in,
+  .fx-drawer-in {
+    animation: none;
+  }
+  .fx-tile,
+  .fx-tile:hover,
+  .fx-tile:active {
+    transition: none;
+    transform: none;
+  }
 }
 
 /* Subtle dark scrollbars */
