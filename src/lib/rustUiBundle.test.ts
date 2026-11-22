@@ -399,4 +399,23 @@ test('YouTube 4-layer adblock script in adblock.rs prunes ytInitialPlayerRespons
   );
 });
 
+test('GitHub Actions build-windows.yml avoids invalid secrets context in if expressions', () => {
+  const workflowPath = path.join(rootDir, '.github', 'workflows', 'build-windows.yml');
+  const yml = fs.readFileSync(workflowPath, 'utf8');
+  const ifLines = yml
+    .split(/\r?\n/)
+    .filter((line) => /^\s*if:\s*/.test(line));
+  for (const line of ifLines) {
+    assert.equal(
+      /\bsecrets\./.test(line),
+      false,
+      `GitHub Actions forbids 'secrets' in if expressions: ${line}`
+    );
+  }
+  assert.ok(yml.includes('IsNullOrWhiteSpace($env:WINDOWS_CERT_PFX_BASE64)'));
+  assert.ok(yml.includes('cargo build --release'));
+  assert.ok(yml.includes('actions/upload-artifact@v4'));
+});
+
+
 

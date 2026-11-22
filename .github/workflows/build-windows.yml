@@ -22,18 +22,26 @@ jobs:
         run: cargo build --release
 
       - name: Authenticode sign ferrox-browser.exe (when PFX secret is configured)
-        if: ${{ secrets.WINDOWS_CERT_PFX_BASE64 != '' }}
         shell: pwsh
         env:
           WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERT_PFX_BASE64)) {
+            Write-Host "WINDOWS_CERT_PFX_BASE64 secret not configured; skipping Authenticode signing."
+            exit 0
+          }
           $pfxPath = Join-Path $env:RUNNER_TEMP "ferrox-codesign.pfx"
-          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
-          $env:FERROX_SIGN_PFX = $pfxPath
-          $env:FERROX_SIGN_PASSWORD = $env:WINDOWS_CERT_PASSWORD
-          ./sign-windows.ps1 -ExePath "target/release/ferrox-browser.exe"
-          Remove-Item $pfxPath -Force
+          try {
+            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
+            $env:FERROX_SIGN_PFX = $pfxPath
+            $env:FERROX_SIGN_PASSWORD = $env:WINDOWS_CERT_PASSWORD
+            ./sign-windows.ps1 -ExePath "target/release/ferrox-browser.exe"
+          } finally {
+            if (Test-Path -LiteralPath $pfxPath) {
+              Remove-Item -LiteralPath $pfxPath -Force
+            }
+          }
 
       - name: Generate SHA-256 checksum
         shell: pwsh
