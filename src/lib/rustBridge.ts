@@ -36,12 +36,18 @@ export interface RustSyncPayload {
   vaultCount: number;
 }
 
+export interface RustContentUpdatePayload {
+  url?: string;
+  title?: string;
+}
+
 declare global {
   interface Window {
     ipc?: {
       postMessage: (message: string) => void;
     };
     __ferroxSync?: (payload: RustSyncPayload) => void;
+    __ferroxContentUpdate?: (payload: RustContentUpdatePayload) => void;
   }
 }
 

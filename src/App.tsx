@@ -171,6 +171,7 @@ export default function App() {
   const [splitTabId, setSplitTabId] = useState<string | null>(null);
   const [activeDrawer, setActiveDrawer] = useState<DrawerTab>(null);
   const [quickSettingsOpen, setQuickSettingsOpen] = useState(false);
+  const [toolbarPopoverOpen, setToolbarPopoverOpen] = useState(false);
   const [pendingImportedCredentials, setPendingImportedCredentials] = useState<VaultCredential[]>([]);
   const [tabSearchOpen, setTabSearchOpen] = useState(false);
   const [hubInitialSection, setHubInitialSection] = useState<HubSection>('bookmarks');
@@ -197,6 +198,8 @@ export default function App() {
   const autofillCounterRef = useRef(1);
   const mainViewportRef = useRef<HTMLElement>(null);
   const rustInitializedRef = useRef(false);
+  const activeTabIdRef = useRef(activeTabId);
+  activeTabIdRef.current = activeTabId;
 
   // Sync theme CSS variables (surface palette + accent/custom hex)
   useEffect(() => {
@@ -322,9 +325,31 @@ export default function App() {
         }));
       }
     };
+    window.__ferroxContentUpdate = (update) => {
+      const currentId = activeTabIdRef.current;
+      if (!currentId) return;
+      setTabs((prev) =>
+        prev.map((t) => {
+          if (t.id !== currentId || t.url.startsWith('ferrox://')) return t;
+          const nextUrl =
+            update.url && (update.url.startsWith('http://') || update.url.startsWith('https://'))
+              ? update.url
+              : t.url;
+          const nextTitle =
+            update.title && update.title.trim().length > 0
+              ? update.title.trim()
+              : nextUrl !== t.url
+              ? deriveTitleFromUrl(nextUrl)
+              : t.title;
+          if (nextUrl === t.url && nextTitle === t.title) return t;
+          return { ...t, url: nextUrl, title: nextTitle };
+        })
+      );
+    };
     sendToRust('ready');
     return () => {
       delete window.__ferroxSync;
+      delete window.__ferroxContentUpdate;
     };
   }, []);
 
@@ -421,6 +446,9 @@ export default function App() {
   // Keep native Rust content_webview aligned with the active viewport pane & hidden behind overlays/ferrox:// routes
   useEffect(() => {
     if (!isRustNativeShell()) return;
+    if (activeTab?.url.startsWith('ferrox://')) {
+      sendToRust('set_active_url', { url: activeTab.url });
+    }
     const syncLayout = () => {
       const container = (mainViewportRef.current?.firstElementChild as HTMLElement | null) ?? mainViewportRef.current;
       if (!container) return;
@@ -428,7 +456,8 @@ export default function App() {
       const isExternal = Boolean(
         activeTab && !activeTab.url.startsWith('ferrox://') && !activeTab.hibernated
       );
-      const overlayBlocks = quickSettingsOpen || tabSearchOpen;
+      const overlayBlocks =
+        quickSettingsOpen || tabSearchOpen || toolbarPopoverOpen || Boolean(pipTabId);
       sendToRust('layout', {
         left: Math.round(rect.left),
         top: Math.round(rect.top),
@@ -453,10 +482,12 @@ export default function App() {
   }, [
     activeTab,
     activeDrawer,
+    pipTabId,
     quickSettingsOpen,
     showBookmarksBar,
     splitTab,
     tabSearchOpen,
+    toolbarPopoverOpen,
     verticalTabs,
   ]);
 
@@ -1248,6 +1279,7 @@ export default function App() {
         onOpenLimiter={() =>
           setActiveDrawer((d) => (d === 'limiter' ? null : 'limiter'))
         }
+        onPopoverOpenChange={setToolbarPopoverOpen}
       />
 
       {/* Optional Slim Bookmarks Bar */}

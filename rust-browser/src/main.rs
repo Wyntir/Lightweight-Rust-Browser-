@@ -9,8 +9,10 @@ mod privacy;
 mod security;
 mod tabs;
 mod theme;
+mod ui_assets;
 mod vault;
 
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,11 +21,16 @@ use tao::{
     dpi::LogicalSize as TaoLogicalSize,
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder},
-    window::{Window, WindowBuilder},
+    window::{Theme as WindowTheme, Window, WindowBuilder},
 };
+#[cfg(target_os = "windows")]
+use wry::{Theme as WebViewTheme, WebViewBuilderExtWindows};
 use wry::{
-    dpi::{LogicalPosition, LogicalSize},
-    http::Request,
+    dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
+    http::{
+        header::{ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_TYPE},
+        Request, Response, StatusCode,
+    },
     Rect, WebView, WebViewBuilder,
 };
 
@@ -37,15 +44,17 @@ use crate::tabs::WorkspaceId;
 use crate::theme::AccentPreset;
 use crate::vault::CredentialVault;
 
-const CHROME_HTML: &str = include_str!("chrome_ui.html");
 const RAIL_WIDTH: f64 = 48.0;
 const DRAWER_WIDTH: f64 = 320.0;
 const TOP_BAR_HEIGHT: f64 = 120.0;
+const OBSIDIAN_BG: (u8, u8, u8, u8) = (11, 13, 18, 255);
 
 #[derive(Debug)]
 enum UserEvent {
     Ipc(String),
     TelemetryTick,
+    ContentNavigated(String),
+    ContentTitleChanged(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,6 +180,13 @@ fn logical_window_size(window: &Window) -> (f64, f64) {
     (logical.width.max(360.0), logical.height.max(240.0))
 }
 
+fn chrome_rect_physical(width: u32, height: u32) -> Rect {
+    Rect {
+        position: PhysicalPosition::new(0, 0).into(),
+        size: PhysicalSize::new(width.max(1), height.max(1)).into(),
+    }
+}
+
 fn content_rect(state: &AppState, window: &Window) -> Rect {
     if let Some((x, y, w, h)) = state.content_rect_override {
         return Rect {
@@ -284,25 +300,47 @@ fn main() {
     let window = WindowBuilder::new()
         .with_title("FerroX Browser")
         .with_inner_size(TaoLogicalSize::new(1360.0, 860.0))
+        .with_theme(Some(WindowTheme::Dark))
         .build(&event_loop)
         .expect("Failed to create FerroX window");
 
-    let (w, h) = logical_window_size(&window);
+    let phys_size = window.inner_size();
     let ipc_proxy = proxy.clone();
 
-    let chrome_webview = build_child(
-        &window,
-        WebViewBuilder::new()
-            .with_html(CHROME_HTML)
-            .with_bounds(Rect {
-                position: LogicalPosition::new(0.0, 0.0).into(),
-                size: LogicalSize::new(w, h).into(),
-            })
-            .with_ipc_handler(move |req: Request<String>| {
-                let _ = ipc_proxy.send_event(UserEvent::Ipc(req.body().clone()));
-            }),
-    )
-    .expect("Failed to initialize FerroX chrome WebView");
+    #[cfg(target_os = "windows")]
+    let chrome_entry_url = "https://ferrox.localhost/index.html";
+    #[cfg(not(target_os = "windows"))]
+    let chrome_entry_url = "ferrox://localhost/index.html";
+
+    let chrome_builder = WebViewBuilder::new()
+        .with_background_color(OBSIDIAN_BG)
+        .with_custom_protocol("ferrox".into(), move |_webview_id, request| {
+            let (bytes, mime) = ui_assets::resolve_ui_asset(request.uri().path());
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, mime)
+                .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .body(Cow::Borrowed(bytes))
+                .unwrap_or_else(|_| {
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(Cow::Borrowed(&b"Failed to build UI asset response"[..]))
+                        .expect("Fallback response must be valid")
+                })
+        })
+        .with_url(chrome_entry_url)
+        .with_bounds(chrome_rect_physical(phys_size.width, phys_size.height))
+        .with_ipc_handler(move |req: Request<String>| {
+            let _ = ipc_proxy.send_event(UserEvent::Ipc(req.body().clone()));
+        });
+
+    #[cfg(target_os = "windows")]
+    let chrome_builder = chrome_builder
+        .with_https_scheme(true)
+        .with_theme(WebViewTheme::Dark);
+
+    let chrome_webview = build_child(&window, chrome_builder)
+        .expect("Failed to initialize FerroX chrome WebView");
 
     let shield = AdShield::with_default_rules();
     let privacy = PrivacyConfig::default();
@@ -327,14 +365,31 @@ fn main() {
         content_visible: false,
     };
 
-    let content_webview = build_child(
-        &window,
-        WebViewBuilder::new()
-            .with_url("about:blank")
-            .with_initialization_script(&combined_init_script)
-            .with_bounds(content_rect(&initial_state, &window)),
-    )
-    .expect("Failed to initialize FerroX content WebView");
+    let nav_proxy = proxy.clone();
+    let title_proxy = proxy.clone();
+
+    let content_builder = WebViewBuilder::new()
+        .with_background_color(OBSIDIAN_BG)
+        .with_url("about:blank")
+        .with_initialization_script(&combined_init_script)
+        .with_navigation_handler(move |url| {
+            if url.starts_with("http://") || url.starts_with("https://") {
+                let _ = nav_proxy.send_event(UserEvent::ContentNavigated(url));
+            }
+            true
+        })
+        .with_document_title_changed_handler(move |title| {
+            if !title.trim().is_empty() {
+                let _ = title_proxy.send_event(UserEvent::ContentTitleChanged(title));
+            }
+        })
+        .with_bounds(content_rect(&initial_state, &window));
+
+    #[cfg(target_os = "windows")]
+    let content_builder = content_builder.with_theme(WebViewTheme::Dark);
+
+    let content_webview = build_child(&window, content_builder)
+        .expect("Failed to initialize FerroX content WebView");
     let _ = content_webview.set_visible(false);
 
     let limiter_bg = Arc::clone(&initial_state.limiter);
@@ -363,15 +418,41 @@ fn main() {
                 *control_flow = ControlFlow::Exit;
             }
             Event::WindowEvent {
-                event: WindowEvent::Resized(_),
+                event: WindowEvent::Resized(new_size),
                 ..
             } => {
-                let (nw, nh) = logical_window_size(&window);
-                let _ = chrome_webview.set_bounds(Rect {
-                    position: LogicalPosition::new(0.0, 0.0).into(),
-                    size: LogicalSize::new(nw, nh).into(),
-                });
+                let _ = chrome_webview
+                    .set_bounds(chrome_rect_physical(new_size.width, new_size.height));
                 let _ = content_webview.set_bounds(content_rect(&state, &window));
+            }
+            Event::WindowEvent {
+                event:
+                    WindowEvent::ScaleFactorChanged {
+                        new_inner_size, ..
+                    },
+                ..
+            } => {
+                let _ = chrome_webview.set_bounds(chrome_rect_physical(
+                    new_inner_size.width,
+                    new_inner_size.height,
+                ));
+                let _ = content_webview.set_bounds(content_rect(&state, &window));
+            }
+            Event::UserEvent(UserEvent::ContentNavigated(url)) => {
+                if let Ok(json_url) = serde_json::to_string(&url) {
+                    let _ = chrome_webview.evaluate_script(&format!(
+                        "if (window.__ferroxContentUpdate) window.__ferroxContentUpdate({{ url: {} }});",
+                        json_url
+                    ));
+                }
+            }
+            Event::UserEvent(UserEvent::ContentTitleChanged(title)) => {
+                if let Ok(json_title) = serde_json::to_string(&title) {
+                    let _ = chrome_webview.evaluate_script(&format!(
+                        "if (window.__ferroxContentUpdate) window.__ferroxContentUpdate({{ title: {} }});",
+                        json_title
+                    ));
+                }
             }
             Event::UserEvent(UserEvent::TelemetryTick) => {
                 let should_hibernate = state
@@ -390,6 +471,14 @@ fn main() {
                 };
                 match msg.action.as_str() {
                     "ready" => {}
+                    "set_active_url" => {
+                        if let Some(url) = msg.url {
+                            state.core.tabs.navigate_active(&url);
+                            if url.starts_with("ferrox://") {
+                                state.content_visible = false;
+                            }
+                        }
+                    }
                     "layout" => {
                         if let (Some(l), Some(t), Some(w), Some(h)) =
                             (msg.left, msg.top, msg.width, msg.height)
@@ -567,7 +656,9 @@ fn main() {
                     "set_search_engine" => {
                         if let Some(engine) = msg.engine {
                             state.core.config.search_engine = match engine.as_str() {
-                                "wikipedia" => "https://en.wikipedia.org/w/index.php?search=".to_string(),
+                                "wikipedia" => {
+                                    "https://en.wikipedia.org/w/index.php?search=".to_string()
+                                }
                                 "crates" => "https://crates.io/search?q=".to_string(),
                                 _ => "https://duckduckgo.com/?q=".to_string(),
                             };

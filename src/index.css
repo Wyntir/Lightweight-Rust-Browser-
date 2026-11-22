@@ -2,6 +2,7 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
+  color-scheme: dark;
   --fx-accent: #FA1E4E;
   --fx-accent-soft: rgba(250, 30, 78, 0.14);
   --fx-bg: #0B0D12;
@@ -18,6 +19,12 @@ body {
   background-color: var(--fx-bg);
   color: #ECEFF4;
   margin: 0;
+}
+
+select,
+select option {
+  background-color: #12151E;
+  color: #ECEFF4;
 }
 
 .font-display {

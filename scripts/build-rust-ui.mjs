@@ -7,16 +7,67 @@ import { build } from 'vite';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
-const outDir = path.resolve(rootDir, 'dist-rust');
-const targetHtml = path.resolve(rootDir, 'rust-browser/src/chrome_ui.html');
+const uiOutDir = path.resolve(rootDir, 'rust-browser/src/ui');
+const uiAssetsRs = path.resolve(rootDir, 'rust-browser/src/ui_assets.rs');
+const legacyHtml = path.resolve(rootDir, 'rust-browser/src/chrome_ui.html');
 
 process.env.NODE_ENV = 'production';
 
+function mimeForExtension(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case '.html':
+      return 'text/html; charset=utf-8';
+    case '.css':
+      return 'text/css; charset=utf-8';
+    case '.js':
+      return 'application/javascript; charset=utf-8';
+    case '.json':
+      return 'application/json; charset=utf-8';
+    case '.svg':
+      return 'image/svg+xml';
+    case '.png':
+      return 'image/png';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.webp':
+      return 'image/webp';
+    case '.woff2':
+      return 'font/woff2';
+    case '.woff':
+      return 'font/woff';
+    case '.ico':
+      return 'image/x-icon';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
+function walkFiles(dir, baseDir) {
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  const results = [];
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...walkFiles(full, baseDir));
+    } else {
+      results.push(path.relative(baseDir, full).replace(/\\/g, '/'));
+    }
+  }
+  return results;
+}
+
 async function main() {
-  fs.rmSync(outDir, { recursive: true, force: true });
+  fs.rmSync(uiOutDir, { recursive: true, force: true });
+  if (fs.existsSync(legacyHtml)) {
+    fs.rmSync(legacyHtml, { force: true });
+  }
 
   await build({
     root: rootDir,
+    base: './',
+    publicDir: false,
     mode: 'production',
     configFile: false,
     logLevel: 'warn',
@@ -27,9 +78,9 @@ async function main() {
       },
     },
     build: {
-      outDir,
+      outDir: uiOutDir,
       emptyOutDir: true,
-      assetsInlineLimit: 1_500_000,
+      assetsInlineLimit: 4096,
       cssCodeSplit: false,
       minify: 'esbuild',
       rollupOptions: {
@@ -39,28 +90,25 @@ async function main() {
           name: 'FerroXChromeUI',
           inlineDynamicImports: true,
           entryFileNames: 'bundle.js',
-          assetFileNames: 'bundle.[ext]',
+          assetFileNames: (assetInfo) => {
+            const name = assetInfo.name || '';
+            if (name.endsWith('.css')) return 'bundle.css';
+            return 'assets/[name][extname]';
+          },
         },
       },
     },
   });
 
-  const files = fs.readdirSync(outDir);
-  const cssFile = files.find((f) => f.endsWith('.css'));
-  const jsFile = files.find((f) => f.endsWith('.js'));
-
-  if (!jsFile) {
-    throw new Error(`Expected bundle.js in ${outDir}, found: ${files.join(', ')}`);
+  const emittedFiles = walkFiles(uiOutDir, uiOutDir);
+  const hasCss = emittedFiles.includes('bundle.css');
+  const hasJs = emittedFiles.includes('bundle.js');
+  if (!hasJs) {
+    throw new Error(`Expected bundle.js in ${uiOutDir}, found: ${emittedFiles.join(', ')}`);
   }
 
-  const cssContent = cssFile ? fs.readFileSync(path.join(outDir, cssFile), 'utf8') : '';
-  const jsContent = fs.readFileSync(path.join(outDir, jsFile), 'utf8');
-
-  const safeCss = cssContent.replace(/<\/style/gi, '<\\/style');
-  const safeJs = jsContent.replace(/<\/script/gi, '<\\/script');
-
-  const html = `<!doctype html>
-<html lang="en" class="dark">
+  const indexHtml = `<!doctype html>
+<html lang="en" class="dark" style="color-scheme: dark;">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -68,21 +116,52 @@ async function main() {
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-    <style>${safeCss}</style>
+    ${hasCss ? '<link rel="stylesheet" href="./bundle.css" />' : ''}
   </head>
   <body class="bg-[#0B0D12] text-[#ECEFF4] antialiased selection:bg-[#FA1E4E]/30">
     <div id="root"></div>
-    <script>${safeJs}</script>
+    <script src="./bundle.js"></script>
   </body>
 </html>
 `;
 
-  fs.mkdirSync(path.dirname(targetHtml), { recursive: true });
-  fs.writeFileSync(targetHtml, html, 'utf8');
-  fs.rmSync(outDir, { recursive: true, force: true });
+  fs.writeFileSync(path.join(uiOutDir, 'index.html'), indexHtml, 'utf8');
 
-  const sizeKb = (Buffer.byteLength(html, 'utf8') / 1024).toFixed(1);
-  console.log(`Generated ${path.relative(rootDir, targetHtml)} (${sizeKb} KB)`);
+  const allFiles = walkFiles(uiOutDir, uiOutDir);
+  const matchArms = allFiles
+    .filter((rel) => rel !== 'index.html')
+    .map((rel) => {
+      const mime = mimeForExtension(rel);
+      return `        "${rel}" => (include_bytes!("ui/${rel}"), "${mime}"),`;
+    })
+    .join('\n');
+
+  const rustModule = `//! Auto-generated by scripts/build-rust-ui.mjs — do not edit manually.
+//! Embeds the compiled FerroX React + Tailwind UI assets served via wry's custom protocol (\`ferrox://\`).
+
+pub fn resolve_ui_asset(raw_path: &str) -> (&'static [u8], &'static str) {
+    let clean = raw_path
+        .split('?')
+        .next()
+        .unwrap_or(raw_path)
+        .trim_start_matches('/');
+    match clean {
+        "" | "index.html" => (include_bytes!("ui/index.html"), "text/html; charset=utf-8"),
+${matchArms}
+        _ => (include_bytes!("ui/index.html"), "text/html; charset=utf-8"),
+    }
+}
+`;
+
+  fs.writeFileSync(uiAssetsRs, rustModule, 'utf8');
+
+  const totalBytes = allFiles.reduce(
+    (sum, rel) => sum + fs.statSync(path.join(uiOutDir, rel)).size,
+    0
+  );
+  console.log(
+    `Generated rust-browser/src/ui/ (${allFiles.length} files, ${(totalBytes / 1024).toFixed(1)} KB total) and rust-browser/src/ui_assets.rs`
+  );
 }
 
 main().catch((err) => {

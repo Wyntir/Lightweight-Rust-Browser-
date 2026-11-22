@@ -10,7 +10,8 @@ interface RustFileEntry {
 }
 
 const NATIVE_CRATE_MODULES = [
-  { path: 'src/main.rs', desc: 'Dual-WebView desktop host (wry + tao), IPC router & telemetry ticker' },
+  { path: 'src/main.rs', desc: 'Dual-WebView desktop host (wry + tao), custom protocol UI, dark DWM chrome & IPC router' },
+  { path: 'src/ui_assets.rs', desc: 'Embedded React + Tailwind + asset bundle served via ferrox:// custom protocol' },
   { path: 'src/browser.rs', desc: 'Persistent config.json store, omnibox normalizer & bookmarks' },
   { path: 'src/limiter.rs', desc: 'Live sysinfo process RAM/CPU sampling & auto-hibernation engine' },
   { path: 'src/tabs.rs', desc: 'Workspace isolation, tab pins, back/forward stacks & hibernation' },

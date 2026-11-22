@@ -4,8 +4,8 @@ FerroX is a lightweight, resource-bounded desktop web browser written in Rust, i
 
 ## Modules
 
-- **`src/main.rs`** — Boots `tao` + dual `wry` WebViews (chrome shell + live web content WebView), handles IPC commands, and enforces RAM limits on background tabs.
-- **`src/chrome_ui.html`** — Embedded GX-style sidebar rail, tab bar, address bar, Speed Dial, and Resource Limiter drawer.
+- **`src/main.rs`** — Boots `tao` (dark DWM chrome) + dual `wry` WebViews (chrome shell via `ferrox://` custom protocol + live web content WebView), handles IPC commands, and enforces RAM limits on background tabs.
+- **`src/ui_assets.rs` + `src/ui/`** — Embedded React 19 + Tailwind CSS UI (`index.html`, `bundle.css`, `bundle.js`, backdrop assets) served over `https://ferrox.localhost/` on Windows WebView2 so `localStorage`, WebCrypto, and full styling match the web preview 1:1.
 - **`src/browser.rs`** — Omnibox URL/search normalization, `ferrox://` routes, and persistent `config.json`.
 - **`src/tabs.rs`** — Workspaces (`Main`, `Gaming`, `Dev`, `Research`), per-tab back/forward history, and LRU tab hibernation.
 - **`src/limiter.rs`** — `sysinfo` process tree memory/CPU sampling and token-bucket `BandwidthLimiter`.

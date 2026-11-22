@@ -246,10 +246,21 @@ window.addEventListener('message', function(ev) {
   };
 }
 
-function collectRustFiles(dir: string, baseDir: string): Array<{ path: string; language: string; sizeBytes: number; content: string }> {
+const BINARY_ASSET_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.ico', '.woff', '.woff2']);
+
+function collectRustFiles(
+  dir: string,
+  baseDir: string
+): Array<{ path: string; language: string; sizeBytes: number; isBinary: boolean; buffer: Buffer }> {
   if (!fs.existsSync(dir)) return [];
   const entries = fs.readdirSync(dir, { withFileTypes: true });
-  const results: Array<{ path: string; language: string; sizeBytes: number; content: string }> = [];
+  const results: Array<{
+    path: string;
+    language: string;
+    sizeBytes: number;
+    isBinary: boolean;
+    buffer: Buffer;
+  }> = [];
 
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     const fullPath = path.join(dir, entry.name);
@@ -257,14 +268,29 @@ function collectRustFiles(dir: string, baseDir: string): Array<{ path: string; l
       results.push(...collectRustFiles(fullPath, baseDir));
     } else {
       const relPath = path.relative(baseDir, fullPath).replace(/\\/g, '/');
-      const content = fs.readFileSync(fullPath, 'utf-8');
+      const buffer = fs.readFileSync(fullPath);
       const ext = path.extname(entry.name).toLowerCase();
-      const language = ext === '.rs' ? 'rust' : ext === '.toml' ? 'toml' : ext === '.md' ? 'markdown' : ext === '.html' ? 'html' : 'text';
+      const isBinary = BINARY_ASSET_EXTENSIONS.has(ext);
+      const language =
+        ext === '.rs'
+          ? 'rust'
+          : ext === '.toml'
+          ? 'toml'
+          : ext === '.md'
+          ? 'markdown'
+          : ext === '.html'
+          ? 'html'
+          : ext === '.css'
+          ? 'css'
+          : ext === '.js'
+          ? 'javascript'
+          : 'text';
       results.push({
         path: relPath,
         language,
-        sizeBytes: Buffer.byteLength(content, 'utf-8'),
-        content,
+        sizeBytes: buffer.byteLength,
+        isBinary,
+        buffer,
       });
     }
   }
@@ -275,19 +301,39 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
 
+  const rustUiDir = path.join(RUST_CRATE_DIR, 'src', 'ui');
+  if (fs.existsSync(rustUiDir)) {
+    app.use('/api/rust-ui-preview', express.static(rustUiDir));
+  }
+
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, engine: 'ferrox-proxy', version: '0.2.0' });
   });
 
   app.get('/api/rust-files', (_req, res) => {
     const files = collectRustFiles(RUST_CRATE_DIR, RUST_CRATE_DIR).map((f) => {
-      if (f.path === 'src/chrome_ui.html' && f.sizeBytes > 64_000) {
+      if (f.isBinary) {
         return {
-          ...f,
-          content: `<!-- FerroX Single-File Chrome UI Bundle (${(f.sizeBytes / 1024).toFixed(1)} KB) -->\n<!-- Generated from src/ (React 19 + Tailwind CSS + Lucide + Speed Dial assets) via "npm run build:rust-ui". -->\n<!-- The complete self-contained HTML bundle is included inside ferrox-browser-rust.zip and embedded via include_str!("chrome_ui.html"). -->\n`,
+          path: f.path,
+          language: f.language,
+          sizeBytes: f.sizeBytes,
+          content: `[Binary asset: ${f.path} (${(f.sizeBytes / 1024).toFixed(1)} KB) — embedded via include_bytes! in src/ui_assets.rs and packaged intact inside ferrox-browser-rust.zip.]`,
         };
       }
-      return f;
+      if (f.path.startsWith('src/ui/') && f.sizeBytes > 32_000) {
+        return {
+          path: f.path,
+          language: f.language,
+          sizeBytes: f.sizeBytes,
+          content: `/* FerroX Compiled Chrome UI Asset: ${f.path} (${(f.sizeBytes / 1024).toFixed(1)} KB) */\n/* Built from src/ (React 19 + Tailwind CSS + Lucide) via "npm run build:rust-ui". */\n/* Embedded via include_bytes! in src/ui_assets.rs and served over wry's custom protocol (ferrox://). */\n`,
+        };
+      }
+      return {
+        path: f.path,
+        language: f.language,
+        sizeBytes: f.sizeBytes,
+        content: f.buffer.toString('utf-8'),
+      };
     });
     res.json({ crateName: 'ferrox-browser', files });
   });
@@ -299,7 +345,7 @@ async function startServer() {
       const rootFolder = zip.folder('ferrox-browser');
       if (rootFolder) {
         for (const file of files) {
-          rootFolder.file(file.path, file.content);
+          rootFolder.file(file.path, file.buffer);
         }
       }
       const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });

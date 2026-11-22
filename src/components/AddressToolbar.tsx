@@ -60,6 +60,7 @@ interface AddressToolbarProps {
   onOpenExtensions: () => void;
   onOpenShield: () => void;
   onOpenLimiter: () => void;
+  onPopoverOpenChange?: (open: boolean) => void;
 }
 
 const TRANSLATE_LANGUAGES = ['Spanish', 'French', 'German', 'Japanese', 'Portuguese'];
@@ -102,6 +103,7 @@ export function AddressToolbar({
   onOpenExtensions,
   onOpenShield,
   onOpenLimiter,
+  onPopoverOpenChange,
 }: AddressToolbarProps) {
   const [draft, setDraft] = useState(
     currentUrl === 'ferrox://speed-dial' ? '' : currentUrl
@@ -114,6 +116,10 @@ export function AddressToolbar({
     setPermOpen(false);
     setTranslateOpen(false);
   }, [currentUrl]);
+
+  useEffect(() => {
+    onPopoverOpenChange?.(permOpen || translateOpen);
+  }, [onPopoverOpenChange, permOpen, translateOpen]);
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
