@@ -11,10 +11,12 @@ import {
 } from 'lucide-react';
 import { BookmarkItem, HistoryItem } from '../lib/browserEngine';
 import {
+  ALL_BROWSER_SOURCE_IDS,
   BROWSER_PROFILE_SOURCES,
   BrowserSourceId,
   getSampleProfileData,
   ImportedProfilePreview,
+  inferBrowserSourceFromPath,
   parseProfilePayload,
 } from '../lib/profileImporter';
 import { DetectedBrowserProfile, isRustNativeShell } from '../lib/rustBridge';
@@ -41,7 +43,7 @@ interface ProfileImporterPanelProps {
 }
 
 const SUPPORTED_FOLDER_FILE_RE =
-  /(^|\/)(bookmarks|bookmarks\.html|bookmarks\.json|bookmarks-[^/]+\.json|logins\.csv|passwords\.csv|opera passwords\.csv|chrome passwords\.csv)$/i;
+  /(^|\/)(bookmarks|bookmarks\.html|bookmarks\.json|bookmarks\.plist|bookmarks-[^/]+\.json|logins\.csv|passwords\.csv|opera passwords\.csv|chrome passwords\.csv|microsoft edge passwords\.csv|brave passwords\.csv|vivaldi passwords\.csv|safari passwords\.csv)$/i;
 
 export function ProfileImporterPanel({
   detectedProfiles,
@@ -126,10 +128,7 @@ export function ProfileImporterPanel({
 
       try {
         const text = await file.text();
-        const inferredSource: BrowserSourceId =
-          lower.includes('firefox') || lower.includes('mozilla') || lower.includes('bookmarkbackups')
-            ? 'firefox'
-            : 'operagx';
+        const inferredSource: BrowserSourceId = inferBrowserSourceFromPath(rel);
         const parsed = parseProfilePayload(text, file.name, inferredSource);
         mergedBookmarks.push(...parsed.bookmarks);
         mergedHistory.push(...parsed.history);
@@ -213,10 +212,10 @@ export function ProfileImporterPanel({
           <div>
             <h3 className="font-display text-base font-semibold text-white flex items-center gap-2">
               <Zap className="w-4 h-4" style={{ color: 'var(--fx-accent)' }} aria-hidden="true" />
-              Instant Browser Sync (Opera GX, Opera &amp; Firefox)
+              Instant Browser Sync (All Major Browsers)
             </h3>
             <p className="text-xs text-slate-400 mt-0.5">
-              Immediately pull bookmarks, history, and exported passwords from installed browsers so switching is painless.
+              Immediately pull bookmarks, history, and exported passwords from Chrome, Edge, Brave, Opera GX, Opera, Firefox, Vivaldi, Arc, LibreWolf &amp; Safari.
             </p>
           </div>
 
@@ -300,7 +299,7 @@ export function ProfileImporterPanel({
               </div>
             ) : (
               <div className="p-3.5 rounded-lg bg-black/25 border border-white/8 text-xs text-slate-400">
-                No Opera GX, Opera, or Mozilla Firefox profiles were found in default system directories yet. Click{' '}
+                No Chrome, Edge, Brave, Opera GX, Opera, Firefox, Vivaldi, Arc, or Safari profiles were found in default system directories yet. Click{' '}
                 <strong className="text-slate-200">Rescan PC</strong> or import exported files manually below.
               </div>
             )}
@@ -308,11 +307,11 @@ export function ProfileImporterPanel({
         ) : (
           <div className="space-y-3">
             <div className="p-3 rounded-lg bg-black/25 border border-white/8 text-xs text-slate-300 leading-relaxed">
-              In the compiled Windows/macOS/Linux desktop binary, FerroX automatically reads live{' '}
-              <code className="font-mono-tabular text-white">Opera GX / Opera</code> and{' '}
-              <code className="font-mono-tabular text-white">Firefox places.sqlite</code> profiles (even while they are open). In this web preview, pick a profile folder or test 1-click sync below:
+              In the compiled Windows/macOS/Linux desktop binary, FerroX automatically scans and syncs{' '}
+              <code className="font-mono-tabular text-white">Chrome, Edge, Brave, Opera GX, Opera, Vivaldi, Arc, Firefox, LibreWolf, Waterfox, Floorp &amp; Safari</code>{' '}
+              (including multi-profile folders, even while open). In this web preview, pick any browser profile folder or test 1-click sync below:
             </div>
-            <div className="flex flex-wrap items-center gap-2.5">
+            <div className="flex flex-wrap items-center gap-2">
               <label
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold text-white cursor-pointer"
                 style={{ backgroundColor: 'var(--fx-accent)' }}
@@ -328,23 +327,17 @@ export function ProfileImporterPanel({
                 />
               </label>
 
-              <button
-                type="button"
-                onClick={() => handleQuickDemoSync('operagx')}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-black/25 hover:bg-white/10 border border-white/10 text-xs font-medium text-slate-200"
-              >
-                <Zap className="w-3.5 h-3.5" style={{ color: 'var(--fx-accent)' }} aria-hidden="true" />
-                1-Click Sync Opera GX
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleQuickDemoSync('firefox')}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-black/25 hover:bg-white/10 border border-white/10 text-xs font-medium text-slate-200"
-              >
-                <Zap className="w-3.5 h-3.5" style={{ color: 'var(--fx-accent)' }} aria-hidden="true" />
-                1-Click Sync Firefox
-              </button>
+              {(['chrome', 'edge', 'brave', 'operagx', 'firefox', 'safari'] as BrowserSourceId[]).map((id) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => handleQuickDemoSync(id)}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-black/25 hover:bg-white/10 border border-white/10 text-xs font-medium text-slate-200"
+                >
+                  <Zap className="w-3 h-3" style={{ color: 'var(--fx-accent)' }} aria-hidden="true" />
+                  Sync {BROWSER_PROFILE_SOURCES[id].name}
+                </button>
+              ))}
             </div>
           </div>
         )}
@@ -392,13 +385,15 @@ export function ProfileImporterPanel({
               Manual File Import (Passwords CSV, HTML &amp; JSON)
             </h3>
             <p className="text-xs text-slate-400 mt-0.5">
-              Drop exported <code className="font-mono-tabular text-slate-300">logins.csv</code>,{' '}
-              <code className="font-mono-tabular text-slate-300">Opera Passwords.csv</code>, or bookmark backup files directly.
+              Drop exported <code className="font-mono-tabular text-slate-300">Chrome Passwords.csv</code>,{' '}
+              <code className="font-mono-tabular text-slate-300">logins.csv</code>,{' '}
+              <code className="font-mono-tabular text-slate-300">Bookmarks</code>, or{' '}
+              <code className="font-mono-tabular text-slate-300">bookmarks.html</code> from any browser.
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
-            {(['operagx', 'firefox'] as BrowserSourceId[]).map((id) => {
+          <div className="flex flex-wrap items-center gap-1.5">
+            {ALL_BROWSER_SOURCE_IDS.map((id) => {
               const active = source === id;
               return (
                 <button
@@ -409,7 +404,7 @@ export function ProfileImporterPanel({
                     setPreview(null);
                   }}
                   aria-pressed={active}
-                  className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
                     active
                       ? 'text-white border-white/25'
                       : 'bg-black/20 border-white/8 text-slate-400 hover:text-white'

@@ -18,6 +18,7 @@ import {
   DEFAULT_TRACKER_RULES,
   deriveTitleFromUrl,
   DownloadItem,
+  duplicateTab,
   evaluateResourceBudget,
   evaluateUrlSecurity,
   getNextTabId,
@@ -233,6 +234,7 @@ export default function App() {
   const [activeDrawer, setActiveDrawer] = useState<DrawerTab>(null);
   const [quickSettingsOpen, setQuickSettingsOpen] = useState(false);
   const [toolbarPopoverOpen, setToolbarPopoverOpen] = useState(false);
+  const [tabContextMenuOpen, setTabContextMenuOpen] = useState(false);
   const [pendingImportedCredentials, setPendingImportedCredentials] = useState<VaultCredential[]>([]);
   const [tabSearchOpen, setTabSearchOpen] = useState(false);
   const [hubInitialSection, setHubInitialSection] = useState<HubSection>('bookmarks');
@@ -572,7 +574,7 @@ export default function App() {
       setSyncingProfileId(null);
       if (!Array.isArray(results) || results.length === 0) {
         setLastSyncSummary({
-          message: 'No matching Opera or Firefox profile data found to import.',
+          message: 'No matching installed browser profile data found to import.',
           notes: [],
         });
         return;
@@ -711,6 +713,11 @@ export default function App() {
       httpsOnly: privacyConfig.httpsOnly,
       safeBrowsing: privacyConfig.safeBrowsing,
       fingerprintProtection: privacyConfig.fingerprintProtection,
+      webrtcIpProtection: privacyConfig.webrtcIpProtection,
+      stripTrackingParams: privacyConfig.stripTrackingParams,
+      blockCryptominers: privacyConfig.blockCryptominers,
+      globalPrivacyControl: privacyConfig.globalPrivacyControl,
+      blockHyperlinkAuditing: privacyConfig.blockHyperlinkAuditing,
       vpnEnabled: privacyConfig.vpnEnabled,
       vpnRegion: privacyConfig.vpnRegion,
     });
@@ -718,6 +725,11 @@ export default function App() {
     privacyConfig.httpsOnly,
     privacyConfig.safeBrowsing,
     privacyConfig.fingerprintProtection,
+    privacyConfig.webrtcIpProtection,
+    privacyConfig.stripTrackingParams,
+    privacyConfig.blockCryptominers,
+    privacyConfig.globalPrivacyControl,
+    privacyConfig.blockHyperlinkAuditing,
     privacyConfig.vpnEnabled,
     privacyConfig.vpnRegion,
   ]);
@@ -795,7 +807,11 @@ export default function App() {
         activeTab && !activeTab.url.startsWith('ferrox://') && !activeTab.hibernated
       );
       const overlayBlocks =
-        quickSettingsOpen || tabSearchOpen || toolbarPopoverOpen || Boolean(pipTabId);
+        quickSettingsOpen ||
+        tabSearchOpen ||
+        toolbarPopoverOpen ||
+        tabContextMenuOpen ||
+        Boolean(pipTabId);
       const left = Math.round(rect.left);
       const top = Math.round(rect.top);
       const rawWidth = splitTab ? rect.width / 2 : rect.width;
@@ -834,6 +850,7 @@ export default function App() {
     quickSettingsOpen,
     showBookmarksBar,
     splitTab,
+    tabContextMenuOpen,
     tabSearchOpen,
     toolbarPopoverOpen,
     verticalTabs,
@@ -855,7 +872,8 @@ export default function App() {
       const sec = evaluateUrlSecurity(
         url,
         privacyConfig.httpsOnly,
-        options?.bypassSafeBrowsing ? false : privacyConfig.safeBrowsing
+        options?.bypassSafeBrowsing ? false : privacyConfig.safeBrowsing,
+        privacyConfig.stripTrackingParams
       );
 
       if (!sec.safe && sec.threatType && sec.reason) {
@@ -883,7 +901,18 @@ export default function App() {
       }
 
       const targetUrl = sec.upgradedUrl;
-      if (sec.upgradedFromHttp) {
+      if (sec.strippedTrackers > 0) {
+        setBlockedEvents((prev) => [
+          {
+            id: `blk-utm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            host: `url-tracker-stripped (${sec.strippedTrackers})`,
+            pageUrl: targetUrl,
+            timestamp: Date.now(),
+          },
+          ...prev,
+        ]);
+      }
+      if (sec.upgradedFromHttp || targetUrl !== url) {
         setTabs((prev) =>
           prev.map((t) => (t.id === tabId ? { ...t, url: targetUrl } : t))
         );
@@ -966,6 +995,7 @@ export default function App() {
           url: targetUrl,
           shield: shieldEnabled ? '1' : '0',
           fp: privacyConfig.fingerprintProtection ? '1' : '0',
+          stripTrackers: privacyConfig.stripTrackingParams ? '1' : '0',
           limitKbps: limiter.netEnabled ? String(limiter.netLimitKbps) : '0',
           rules: trackerRules.join(','),
         });
@@ -1045,6 +1075,7 @@ export default function App() {
       privacyConfig.fingerprintProtection,
       privacyConfig.httpsOnly,
       privacyConfig.safeBrowsing,
+      privacyConfig.stripTrackingParams,
       shieldEnabled,
       trackerRules,
     ]
@@ -1209,6 +1240,115 @@ export default function App() {
       rustActivateTab(restoredId, restored.url, false);
     }
   }, [fetchExternalUrl]);
+
+  const handleDuplicateTab = useCallback(
+    (sourceId: string) => {
+      const source = tabs.find((t) => t.id === sourceId);
+      if (!source) return;
+      const newId = `tab-${tabCounterRef.current++}`;
+      const cloned = duplicateTab(source, newId);
+
+      setTabs((prev) => {
+        const idx = prev.findIndex((t) => t.id === sourceId);
+        if (idx === -1) return [...prev, cloned];
+        const next = [...prev];
+        next.splice(idx + 1, 0, cloned);
+        return next;
+      });
+      setActiveWorkspace(cloned.workspace);
+      setActiveTabId(newId);
+
+      if (!cloned.url.startsWith('ferrox://')) {
+        if (isRustNativeShell()) {
+          rustNavigateTab(newId, cloned.url, { isPrivate: cloned.isPrivate, background: false });
+        } else {
+          const cached = pageCache[sourceId];
+          if (cached) {
+            setPageCache((prev) => ({ ...prev, [newId]: cached }));
+          } else {
+            void fetchExternalUrl(newId, cloned.url, { isPrivate: cloned.isPrivate });
+          }
+        }
+      } else if (isRustNativeShell()) {
+        rustActivateTab(newId, cloned.url, cloned.isPrivate);
+      }
+    },
+    [fetchExternalUrl, pageCache, tabs]
+  );
+
+  const handleReloadTabById = useCallback(
+    (targetId: string) => {
+      const target = tabs.find((t) => t.id === targetId);
+      if (!target || target.url.startsWith('ferrox://')) return;
+      if (isRustNativeShell()) {
+        rustTabReload(target.id);
+      } else {
+        void fetchExternalUrl(target.id, target.url, {
+          isPrivate: target.isPrivate,
+          forceReload: true,
+        });
+      }
+    },
+    [fetchExternalUrl, tabs]
+  );
+
+  const handleHibernateTabById = useCallback(
+    (tabId: string) => {
+      if (tabId === activeTabId || tabId === splitTabId) return;
+      if (isRustNativeShell()) {
+        rustHibernateTab(tabId);
+      }
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === tabId ? { ...t, hibernated: true, estimatedRamMb: 8, estimatedCpuPercent: 0 } : t
+        )
+      );
+    },
+    [activeTabId, splitTabId]
+  );
+
+  const handleCloseOtherTabs = useCallback(
+    (keepId: string) => {
+      const toClose = tabs.filter(
+        (t) => t.workspace === activeWorkspace && t.id !== keepId && !t.pinned
+      );
+      if (toClose.length === 0) return;
+
+      for (const closing of toClose) {
+        if (!closing.isPrivate) {
+          closedTabsRef.current = [...closedTabsRef.current.slice(-24), closing];
+        }
+        if (isRustNativeShell()) {
+          rustCloseTab(closing.id);
+        }
+      }
+
+      const closedIds = new Set(toClose.map((t) => t.id));
+      setPageCache((prev) => {
+        const next = { ...prev };
+        for (const id of closedIds) delete next[id];
+        return next;
+      });
+      setTabZooms((prev) => {
+        const next = { ...prev };
+        for (const id of closedIds) delete next[id];
+        return next;
+      });
+      if (splitTabId && closedIds.has(splitTabId)) {
+        setSplitTabId(null);
+      }
+      if (pipTabId && closedIds.has(pipTabId)) {
+        setPipTabId(null);
+      }
+      setTabs((prev) => prev.filter((t) => !closedIds.has(t.id)));
+      setActiveTabId(keepId);
+      const kept = tabs.find((t) => t.id === keepId);
+      if (kept && isRustNativeShell()) {
+        rustActivateTab(kept.id, kept.url, kept.isPrivate);
+      }
+    },
+    [activeWorkspace, pipTabId, splitTabId, tabs]
+  );
 
   const handleSelectWorkspace = useCallback(
     (ws: WorkspaceId) => {
@@ -1835,6 +1975,10 @@ export default function App() {
         quickSettingsOpen={quickSettingsOpen}
         onSelectTab={handleSelectTab}
         onCloseTab={handleCloseTab}
+        onDuplicateTab={handleDuplicateTab}
+        onReloadTab={handleReloadTabById}
+        onHibernateTab={handleHibernateTabById}
+        onCloseOtherTabs={handleCloseOtherTabs}
         onNewTab={() => handleNewTab('ferrox://speed-dial', false)}
         onNewPrivateTab={() => handleNewTab('ferrox://speed-dial', true)}
         onTogglePin={(id) =>
@@ -1851,6 +1995,7 @@ export default function App() {
         onOpenTabSearch={() => setTabSearchOpen(true)}
         onToggleVerticalTabs={() => setVerticalTabs((v) => !v)}
         onToggleQuickSettings={() => setQuickSettingsOpen((o) => !o)}
+        onContextMenuOpenChange={setTabContextMenuOpen}
       />
 
       <QuickSettingsPopover
@@ -1982,6 +2127,10 @@ export default function App() {
             splitTabId={splitTab?.id ?? null}
             onSelectTab={handleSelectTab}
             onCloseTab={handleCloseTab}
+            onDuplicateTab={handleDuplicateTab}
+            onReloadTab={handleReloadTabById}
+            onHibernateTab={handleHibernateTabById}
+            onCloseOtherTabs={handleCloseOtherTabs}
             onNewTab={() => handleNewTab('ferrox://speed-dial', false)}
             onNewPrivateTab={() => handleNewTab('ferrox://speed-dial', true)}
             onTogglePin={(id) =>
@@ -1998,6 +2147,7 @@ export default function App() {
               )
             }
             onOpenTabSearch={() => setTabSearchOpen(true)}
+            onContextMenuOpenChange={setTabContextMenuOpen}
           />
         )}
 

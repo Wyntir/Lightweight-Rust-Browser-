@@ -289,7 +289,7 @@ export const SpeedDialView = memo(function SpeedDialView({
                 {blockedTotal} blocked
               </div>
               <p className="text-xs text-slate-400 mt-1">
-                HTTPS enforcement, Safe Browsing checks, DoH, and anti-fingerprinting enabled.
+                HTTPS-Only, WebRTC IP-leak guard, tracker stripping, cryptominer &amp; anti-fingerprint shields active.
               </p>
             </div>
             <button
@@ -308,19 +308,19 @@ export const SpeedDialView = memo(function SpeedDialView({
             <div>
               <div className="flex items-center gap-2 text-xs font-medium text-slate-400">
                 <Terminal className="w-4 h-4" style={{ color: 'var(--fx-accent)' }} aria-hidden="true" />
-                {isRustNativeShell() ? 'Instant Browser Sync' : 'Native Rust Desktop Crate'}
+                {isRustNativeShell() ? 'Universal Browser Sync' : 'Native Rust Desktop Crate'}
               </div>
               <div className="font-display text-lg font-semibold text-white mt-2">
                 {isRustNativeShell()
                   ? detectedProfilesCount > 0
                     ? `${detectedProfilesCount} Browser Profile${detectedProfilesCount === 1 ? '' : 's'} Found`
-                    : 'Opera GX & Firefox Sync'
+                    : 'All-Browser Sync'
                   : 'wry + tao + rusqlite'}
               </div>
               <p className="text-xs text-slate-400 mt-1">
                 {isRustNativeShell()
-                  ? 'Pull bookmarks and history from Opera GX, Opera, and Firefox in one click.'
-                  : 'Auto-syncs Opera & Firefox profiles natively. Inspect Cargo modules or export the .zip.'}
+                  ? 'Pull bookmarks, history & logins from Chrome, Edge, Brave, Opera GX, Firefox, Vivaldi & Safari.'
+                  : 'Auto-syncs Chrome, Edge, Brave, Opera GX, Firefox, Vivaldi & Safari profiles natively.'}
               </p>
             </div>
             {isRustNativeShell() ? (
@@ -331,7 +331,7 @@ export const SpeedDialView = memo(function SpeedDialView({
                   className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white whitespace-nowrap"
                   style={{ backgroundColor: 'var(--fx-accent)' }}
                 >
-                  {detectedProfilesCount > 0 ? 'Sync Opera & Firefox' : 'Profile Sync'}
+                  {detectedProfilesCount > 0 ? 'Sync All Browsers' : 'Profile Sync'}
                 </button>
                 <button
                   type="button"
@@ -349,7 +349,7 @@ export const SpeedDialView = memo(function SpeedDialView({
                   className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white whitespace-nowrap"
                   style={{ backgroundColor: 'var(--fx-accent)' }}
                 >
-                  Sync Opera &amp; Firefox
+                  Sync All Browsers
                 </button>
                 <button
                   type="button"

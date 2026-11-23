@@ -244,6 +244,11 @@ export interface PrivacySecurityConfig {
   blockThirdPartyCookies: boolean;
   clearCookiesOnExit: boolean;
   fingerprintProtection: boolean;
+  webrtcIpProtection: boolean;
+  stripTrackingParams: boolean;
+  blockCryptominers: boolean;
+  globalPrivacyControl: boolean;
+  blockHyperlinkAuditing: boolean;
   dohProvider: DohProviderId;
   customDohUrl: string;
   vpnEnabled: boolean;
@@ -263,6 +268,11 @@ export const DEFAULT_PRIVACY_CONFIG: PrivacySecurityConfig = {
   blockThirdPartyCookies: true,
   clearCookiesOnExit: false,
   fingerprintProtection: true,
+  webrtcIpProtection: true,
+  stripTrackingParams: true,
+  blockCryptominers: true,
+  globalPrivacyControl: true,
+  blockHyperlinkAuditing: true,
   dohProvider: 'cloudflare',
   customDohUrl: '',
   vpnEnabled: false,
@@ -342,6 +352,13 @@ export const DEFAULT_TRACKER_RULES: string[] = [
   'hotjar.com',
   'segment.io',
   'ads.twitter.com',
+  'coinhive.com',
+  'coin-hive.com',
+  'cryptoloot.pro',
+  'crypto-loot.com',
+  'webminepool.com',
+  'minero.cc',
+  'jsecoin.com',
 ];
 
 export const PHISHING_BLOCKLIST: string[] = [
@@ -350,7 +367,66 @@ export const PHISHING_BLOCKLIST: string[] = [
   'login-verify-account.example',
   'secure-wallet-airdrop.example',
   'paypal-security-check.example',
+  'coinhive.com',
+  'coin-hive.com',
+  'cryptoloot.pro',
+  'crypto-loot.com',
+  'webminepool.com',
 ];
+
+const TRACKING_QUERY_PARAMS = new Set([
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_term',
+  'utm_content',
+  'utm_id',
+  'fbclid',
+  'gclid',
+  'dclid',
+  'msclkid',
+  'mc_eid',
+  'mc_cid',
+  'yclid',
+  'igshid',
+  '_hsenc',
+  '_hsmi',
+  'mkt_tok',
+  'ref_src',
+  'oly_enc_id',
+  'oly_anon_id',
+  'vero_id',
+  'rb_clickid',
+  's_cid',
+]);
+
+export function stripTrackingQueryParams(rawUrl: string): {
+  cleanUrl: string;
+  strippedCount: number;
+} {
+  try {
+    const parsed = new URL(rawUrl);
+    if (!parsed.search) {
+      return { cleanUrl: rawUrl, strippedCount: 0 };
+    }
+    const toDelete: string[] = [];
+    parsed.searchParams.forEach((_val, key) => {
+      const lower = key.toLowerCase();
+      if (lower.startsWith('utm_') || TRACKING_QUERY_PARAMS.has(lower)) {
+        toDelete.push(key);
+      }
+    });
+    if (toDelete.length === 0) {
+      return { cleanUrl: rawUrl, strippedCount: 0 };
+    }
+    for (const k of toDelete) {
+      parsed.searchParams.delete(k);
+    }
+    return { cleanUrl: parsed.toString(), strippedCount: toDelete.length };
+  } catch {
+    return { cleanUrl: rawUrl, strippedCount: 0 };
+  }
+}
 
 export type SearchEngineId = 'duckduckgo' | 'wikipedia' | 'crates';
 
@@ -405,12 +481,14 @@ export interface SecurityAssessment {
   insecureHttpWarning: boolean;
   threatType: 'phishing' | 'malware' | null;
   reason: string | null;
+  strippedTrackers: number;
 }
 
 export function evaluateUrlSecurity(
   rawUrl: string,
   httpsOnly: boolean,
-  safeBrowsing: boolean
+  safeBrowsing: boolean,
+  stripTrackingParams: boolean = true
 ): SecurityAssessment {
   if (rawUrl.startsWith('ferrox://')) {
     return {
@@ -420,6 +498,24 @@ export function evaluateUrlSecurity(
       insecureHttpWarning: false,
       threatType: null,
       reason: null,
+      strippedTrackers: 0,
+    };
+  }
+
+  const trimmedLower = rawUrl.trim().toLowerCase();
+  if (
+    trimmedLower.startsWith('javascript:') ||
+    trimmedLower.startsWith('vbscript:') ||
+    trimmedLower.startsWith('data:text/html')
+  ) {
+    return {
+      safe: false,
+      upgradedUrl: rawUrl,
+      upgradedFromHttp: false,
+      insecureHttpWarning: false,
+      threatType: 'malware',
+      reason: 'Blocked unsafe script or HTML navigation scheme.',
+      strippedTrackers: 0,
     };
   }
 
@@ -434,12 +530,37 @@ export function evaluateUrlSecurity(
       insecureHttpWarning: false,
       threatType: 'malware',
       reason: 'Malformed URL rejected by security parser.',
+      strippedTrackers: 0,
+    };
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return {
+      safe: false,
+      upgradedUrl: rawUrl,
+      upgradedFromHttp: false,
+      insecureHttpWarning: false,
+      threatType: 'malware',
+      reason: `Blocked non-HTTP(S) navigation scheme: ${parsed.protocol}`,
+      strippedTrackers: 0,
     };
   }
 
   const host = parsed.hostname.toLowerCase();
 
   if (safeBrowsing) {
+    if (parsed.username) {
+      return {
+        safe: false,
+        upgradedUrl: rawUrl,
+        upgradedFromHttp: false,
+        insecureHttpWarning: false,
+        threatType: 'phishing',
+        reason: 'Blocked deceptive URL containing embedded login credentials (@-trick).',
+        strippedTrackers: 0,
+      };
+    }
+
     for (const sig of PHISHING_BLOCKLIST) {
       if (host === sig || host.endsWith(`.${sig}`)) {
         return {
@@ -447,12 +568,27 @@ export function evaluateUrlSecurity(
           upgradedUrl: rawUrl,
           upgradedFromHttp: false,
           insecureHttpWarning: false,
-          threatType: sig.includes('malware') ? 'malware' : 'phishing',
+          threatType:
+            sig.includes('malware') || sig.includes('coin') || sig.includes('crypto') || sig.includes('mine')
+              ? 'malware'
+              : 'phishing',
           reason: `Matched Safe Browsing threat signature: ${sig}`,
+          strippedTrackers: 0,
         };
       }
     }
-    if (host.startsWith('xn--') && (host.includes('login') || host.includes('bank'))) {
+
+    const suspiciousBrand =
+      host.includes('login') ||
+      host.includes('bank') ||
+      host.includes('wallet') ||
+      host.includes('verify') ||
+      host.includes('account') ||
+      host.includes('paypal') ||
+      host.includes('apple') ||
+      host.includes('microsoft') ||
+      host.includes('google');
+    if (host.startsWith('xn--') && suspiciousBrand) {
       return {
         safe: false,
         upgradedUrl: rawUrl,
@@ -460,7 +596,17 @@ export function evaluateUrlSecurity(
         insecureHttpWarning: false,
         threatType: 'phishing',
         reason: 'Suspicious IDN homograph lookalike domain flagged.',
+        strippedTrackers: 0,
       };
+    }
+  }
+
+  let strippedTrackers = 0;
+  if (stripTrackingParams) {
+    const cleaned = stripTrackingQueryParams(parsed.toString());
+    strippedTrackers = cleaned.strippedCount;
+    if (strippedTrackers > 0) {
+      parsed = new URL(cleaned.cleanUrl);
     }
   }
 
@@ -474,6 +620,7 @@ export function evaluateUrlSecurity(
         insecureHttpWarning: false,
         threatType: null,
         reason: 'Automatically upgraded HTTP connection to HTTPS.',
+        strippedTrackers,
       };
     }
     return {
@@ -483,6 +630,7 @@ export function evaluateUrlSecurity(
       insecureHttpWarning: true,
       threatType: null,
       reason: 'Unencrypted HTTP connection.',
+      strippedTrackers,
     };
   }
 
@@ -493,6 +641,7 @@ export function evaluateUrlSecurity(
     insecureHttpWarning: false,
     threatType: null,
     reason: null,
+    strippedTrackers,
   };
 }
 
@@ -550,6 +699,19 @@ export function createTab(
     isPrivate: Boolean(options?.isPrivate),
     estimatedRamMb: estimateTabMemoryMb(normalized, false),
     estimatedCpuPercent: estimateTabCpuPercent(normalized, false, true),
+    lastActiveAt: now,
+  };
+}
+
+export function duplicateTab(source: Tab, newId: string, now: number = Date.now()): Tab {
+  return {
+    ...source,
+    id: newId,
+    history: [...source.history],
+    pinned: false,
+    hibernated: false,
+    estimatedRamMb: estimateTabMemoryMb(source.url, false),
+    estimatedCpuPercent: estimateTabCpuPercent(source.url, false, true),
     lastActiveAt: now,
   };
 }

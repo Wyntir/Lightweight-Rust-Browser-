@@ -79,7 +79,7 @@ impl ResourceLimiter {
     pub fn new(config: LimiterConfig) -> Self {
         let mut system = System::new();
         let pid = Pid::from_u32(std::process::id());
-        let kind = ProcessRefreshKind::nothing().with_memory().with_cpu();
+        let kind = ProcessRefreshKind::new().with_memory().with_cpu();
         system.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
         Self {
             config,
@@ -90,7 +90,7 @@ impl ResourceLimiter {
     }
 
     pub fn sample_process_metrics(&mut self) {
-        let kind = ProcessRefreshKind::nothing().with_memory().with_cpu();
+        let kind = ProcessRefreshKind::new().with_memory().with_cpu();
         self.system
             .refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
 

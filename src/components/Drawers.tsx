@@ -893,8 +893,63 @@ export function Drawers({
         )}
 
         {/* PRIVACY, SHIELD, DOH, CLEAR DATA */}
-        {activeDrawer === 'privacy' && (
+        {activeDrawer === 'privacy' && (() => {
+          const activeHardenedCount = [
+            shieldEnabled,
+            privacyConfig.httpsOnly,
+            privacyConfig.safeBrowsing,
+            privacyConfig.fingerprintProtection,
+            privacyConfig.webrtcIpProtection,
+            privacyConfig.stripTrackingParams,
+            privacyConfig.blockCryptominers,
+            privacyConfig.globalPrivacyControl,
+            privacyConfig.blockHyperlinkAuditing,
+          ].filter(Boolean).length;
+          const totalHardened = 9;
+          const postureLabel =
+            activeHardenedCount >= 8
+              ? 'Hardened'
+              : activeHardenedCount >= 5
+              ? 'Balanced'
+              : 'Reduced';
+          const postureColor =
+            activeHardenedCount >= 8
+              ? 'text-emerald-400'
+              : activeHardenedCount >= 5
+              ? 'text-amber-300'
+              : 'text-rose-400';
+
+          return (
           <>
+            <div className="p-3 rounded-lg bg-black/30 border border-white/10 space-y-2">
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span className="flex items-center gap-1.5 font-semibold text-white">
+                  <Lock className={`w-3.5 h-3.5 ${postureColor}`} aria-hidden="true" />
+                  Security Posture: <span className={postureColor}>{postureLabel}</span>
+                </span>
+                <span className="font-mono-tabular text-[11px] text-slate-300">
+                  {activeHardenedCount}/{totalHardened} active
+                </span>
+              </div>
+              <div className="h-1.5 w-full rounded-full bg-white/8 overflow-hidden">
+                <div
+                  className="h-full rounded-full transition-all"
+                  style={{
+                    width: `${Math.round((activeHardenedCount / totalHardened) * 100)}%`,
+                    backgroundColor:
+                      activeHardenedCount >= 8
+                        ? '#10B981'
+                        : activeHardenedCount >= 5
+                        ? '#F59E0B'
+                        : '#FB7185',
+                  }}
+                />
+              </div>
+              <p className="text-[11px] text-slate-400 leading-snug">
+                Blocks phishing @-tricks, unsafe schemes, WebRTC IP leaks, cryptominers, canvas/WebGL fingerprinting &amp; URL trackers.
+              </p>
+            </div>
+
             <div className="rounded-lg bg-black/25 border border-white/8 overflow-hidden">
               <div className="flex items-center justify-between p-3">
                 <div className="flex items-center gap-2.5">
@@ -963,7 +1018,55 @@ export function Drawers({
               </label>
 
               <label className="flex items-center justify-between gap-2 text-slate-200 cursor-pointer">
-                <span>Fingerprinting Protection</span>
+                <span>WebRTC IP-Leak Guard</span>
+                <input
+                  type="checkbox"
+                  checked={privacyConfig.webrtcIpProtection}
+                  onChange={(e) =>
+                    onUpdatePrivacyConfig({
+                      ...privacyConfig,
+                      webrtcIpProtection: e.target.checked,
+                    })
+                  }
+                  className="w-4 h-4"
+                  style={{ accentColor: 'var(--fx-accent)' }}
+                />
+              </label>
+
+              <label className="flex items-center justify-between gap-2 text-slate-200 cursor-pointer">
+                <span>Clean URLs (Strip Tracking Params)</span>
+                <input
+                  type="checkbox"
+                  checked={privacyConfig.stripTrackingParams}
+                  onChange={(e) =>
+                    onUpdatePrivacyConfig({
+                      ...privacyConfig,
+                      stripTrackingParams: e.target.checked,
+                    })
+                  }
+                  className="w-4 h-4"
+                  style={{ accentColor: 'var(--fx-accent)' }}
+                />
+              </label>
+
+              <label className="flex items-center justify-between gap-2 text-slate-200 cursor-pointer">
+                <span>Cryptominer Blocker</span>
+                <input
+                  type="checkbox"
+                  checked={privacyConfig.blockCryptominers}
+                  onChange={(e) =>
+                    onUpdatePrivacyConfig({
+                      ...privacyConfig,
+                      blockCryptominers: e.target.checked,
+                    })
+                  }
+                  className="w-4 h-4"
+                  style={{ accentColor: 'var(--fx-accent)' }}
+                />
+              </label>
+
+              <label className="flex items-center justify-between gap-2 text-slate-200 cursor-pointer">
+                <span>Anti-Fingerprinting (Canvas / WebGL)</span>
                 <input
                   type="checkbox"
                   checked={privacyConfig.fingerprintProtection}
@@ -971,6 +1074,38 @@ export function Drawers({
                     onUpdatePrivacyConfig({
                       ...privacyConfig,
                       fingerprintProtection: e.target.checked,
+                    })
+                  }
+                  className="w-4 h-4"
+                  style={{ accentColor: 'var(--fx-accent)' }}
+                />
+              </label>
+
+              <label className="flex items-center justify-between gap-2 text-slate-200 cursor-pointer">
+                <span>Global Privacy Control (GPC / DNT)</span>
+                <input
+                  type="checkbox"
+                  checked={privacyConfig.globalPrivacyControl}
+                  onChange={(e) =>
+                    onUpdatePrivacyConfig({
+                      ...privacyConfig,
+                      globalPrivacyControl: e.target.checked,
+                    })
+                  }
+                  className="w-4 h-4"
+                  style={{ accentColor: 'var(--fx-accent)' }}
+                />
+              </label>
+
+              <label className="flex items-center justify-between gap-2 text-slate-200 cursor-pointer">
+                <span>Block Hyperlink Auditing (&lt;a ping&gt;)</span>
+                <input
+                  type="checkbox"
+                  checked={privacyConfig.blockHyperlinkAuditing}
+                  onChange={(e) =>
+                    onUpdatePrivacyConfig({
+                      ...privacyConfig,
+                      blockHyperlinkAuditing: e.target.checked,
                     })
                   }
                   className="w-4 h-4"
@@ -1164,7 +1299,8 @@ export function Drawers({
               </div>
             </div>
           </>
-        )}
+          );
+        })()}
       </div>
     </section>
   );

@@ -25,6 +25,13 @@ impl AdShield {
             "hotjar.com",
             "segment.io",
             "ads.twitter.com",
+            "coinhive.com",
+            "coin-hive.com",
+            "cryptoloot.pro",
+            "crypto-loot.com",
+            "webminepool.com",
+            "minero.cc",
+            "jsecoin.com",
         ];
         Self {
             enabled: true,
@@ -102,7 +109,14 @@ impl AdShield {
     'mixpanel.com',
     'hotjar.com',
     'segment.io',
-    'ads.twitter.com'
+    'ads.twitter.com',
+    'coinhive.com',
+    'coin-hive.com',
+    'cryptoloot.pro',
+    'crypto-loot.com',
+    'webminepool.com',
+    'minero.cc',
+    'jsecoin.com'
   ];
 
   var YT_AD_URL_PATTERNS = [

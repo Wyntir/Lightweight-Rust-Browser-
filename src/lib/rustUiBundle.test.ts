@@ -119,7 +119,14 @@ test('rust-browser/src/main.rs configures one WebView per tab, persistent WebCon
   assert.ok(mainRs.includes('mod importer;'));
   assert.ok(mainRs.includes('tab_webviews: HashMap<String, WebView>'));
   assert.ok(mainRs.includes('WebContext::new(Some(profile_dir))'));
-  assert.ok(mainRs.includes('WebViewBuilder::new_with_web_context'));
+  assert.ok(mainRs.includes('WebViewBuilder::with_web_context(shared_web_context)'));
+  assert.equal(
+    mainRs.includes('WebViewBuilder::new_with_web_context'),
+    false,
+    'wry 0.47 uses WebViewBuilder::with_web_context, not new_with_web_context'
+  );
+  assert.ok(mainRs.includes('move |url: String, destination_path: &mut PathBuf|'));
+  assert.ok(mainRs.includes('move |url: String, saved_path: Option<PathBuf>, success: bool|'));
   assert.ok(mainRs.includes('.with_custom_protocol("ferrox".into()'));
   assert.ok(mainRs.includes('.with_https_scheme(true)'));
   assert.ok(mainRs.includes('.with_background_color(OBSIDIAN_BG)'));
@@ -149,7 +156,12 @@ test('rust-browser/src/main.rs configures one WebView per tab, persistent WebCon
   assert.ok(mainRs.includes('__ferroxSetShield'));
 
   const limiterRs = fs.readFileSync(limiterRsPath, 'utf8');
-  assert.ok(limiterRs.includes('ProcessRefreshKind::nothing().with_memory().with_cpu()'));
+  assert.ok(limiterRs.includes('ProcessRefreshKind::new().with_memory().with_cpu()'));
+  assert.equal(
+    limiterRs.includes('ProcessRefreshKind::nothing()'),
+    false,
+    'sysinfo 0.32 uses ProcessRefreshKind::new(), not nothing()'
+  );
   assert.ok(limiterRs.includes('refresh_processes_specifics'));
 });
 
@@ -416,6 +428,127 @@ test('GitHub Actions build-windows.yml avoids invalid secrets context in if expr
   assert.ok(yml.includes('cargo build --release'));
   assert.ok(yml.includes('actions/upload-artifact@v4'));
 });
+
+test('Native Rust importer detects all major desktop browsers including multi-profile Chrome, Edge, Brave, Opera, Vivaldi, Arc, Gecko forks, and Safari', () => {
+  const importerRs = fs.readFileSync(importerRsPath, 'utf8');
+  for (const expected of [
+    'Google Chrome',
+    'Microsoft Edge',
+    'Brave',
+    'Opera GX',
+    'Vivaldi',
+    'Arc',
+    'Mozilla Firefox',
+    'LibreWolf',
+    'Waterfox',
+    'Floorp',
+    'Safari',
+    'enumerate_chromium_profile_dirs',
+  ]) {
+    assert.ok(importerRs.includes(expected), `importer.rs missing support for ${expected}`);
+  }
+});
+
+test('Global CSS ensures interactive controls show pointer cursor on hover', () => {
+  const indexCss = fs.readFileSync(path.join(rootDir, 'src', 'index.css'), 'utf8');
+  assert.ok(indexCss.includes('button:not(:disabled)'));
+  assert.ok(indexCss.includes('cursor: pointer;'));
+  assert.ok(indexCss.includes('cursor: not-allowed;'));
+});
+
+test('Hardened privacy.rs runtime script enforces GPC, WebGL/Canvas spoofing, WebRTC IP-leak relay guard, and tracker sendBeacon blocking', () => {
+  const privacyRs = fs.readFileSync(path.join(rustSrcDir, 'privacy.rs'), 'utf8');
+  const match = privacyRs.match(
+    /pub fn anti_fingerprint_script\(&self\) -> &'static str \{\s*r#"([\s\S]*?)"#\s*\}/
+  );
+  assert.ok(match && match[1], 'Could not extract anti_fingerprint_script from privacy.rs');
+  const script = match[1];
+
+  const ipcMessages: Array<{ action: string; host?: string; url?: string }> = [];
+  const rtcConfigsSeen: Array<Record<string, unknown>> = [];
+  const beaconsSent: string[] = [];
+  const iceListeners: Array<(ev: { candidate: { candidate: string } | null }) => void> = [];
+
+  class FakeRTC {
+    constructor(cfg: Record<string, unknown>) {
+      rtcConfigsSeen.push(cfg);
+    }
+    addEventListener(type: string, fn: (ev: { candidate: { candidate: string } | null }) => void) {
+      if (type === 'icecandidate') iceListeners.push(fn);
+    }
+  }
+
+  class FakeWebGL {
+    getParameter(param: number) {
+      return `REAL_GPU_${param}`;
+    }
+  }
+
+  const fakeNavigator: Record<string, unknown> = {
+    sendBeacon: (url: string) => {
+      beaconsSent.push(url);
+      return true;
+    },
+  };
+
+  const sandbox: Record<string, unknown> = {
+    URL,
+    Object,
+    Promise,
+    Math,
+    JSON: { parse: JSON.parse, stringify: JSON.stringify },
+    navigator: fakeNavigator,
+    location: { href: 'https://example.com/page' },
+    document: { addEventListener: () => {} },
+    ipc: {
+      postMessage: (raw: string) => ipcMessages.push(JSON.parse(raw)),
+    },
+    RTCPeerConnection: FakeRTC,
+    WebGLRenderingContext: FakeWebGL,
+  };
+  sandbox.window = sandbox;
+
+  const ctx = vm.createContext(sandbox);
+  vm.runInContext(script, ctx);
+
+  // 1. GPC & hardware concurrency spoofing active by default
+  assert.equal(fakeNavigator.globalPrivacyControl, true);
+  assert.equal(fakeNavigator.doNotTrack, '1');
+  assert.equal(fakeNavigator.hardwareConcurrency, 4);
+
+  // 2. WebGL GPU vendor/renderer normalized
+  const gl = new (sandbox.WebGLRenderingContext as typeof FakeWebGL)();
+  assert.equal(gl.getParameter(37445), 'FerroX Generic GPU');
+  assert.equal(gl.getParameter(37446), 'FerroX Hardened WebGL');
+
+  // 3. WebRTC forces iceTransportPolicy: 'relay' and drops host/.local ICE candidates
+  const RTC = sandbox.RTCPeerConnection as typeof FakeRTC;
+  const pc = new RTC({ iceServers: [] });
+  assert.equal(rtcConfigsSeen[0].iceTransportPolicy, 'relay');
+
+  const receivedCandidates: string[] = [];
+  pc.addEventListener('icecandidate', (ev) => {
+    if (ev.candidate) receivedCandidates.push(ev.candidate.candidate);
+  });
+  iceListeners[0]({ candidate: { candidate: 'candidate:1 1 udp 2122260223 192.168.1.42 54321 typ host' } });
+  iceListeners[0]({ candidate: { candidate: 'candidate:2 1 udp 1677729535 203.0.113.10 54322 typ relay' } });
+  assert.deepEqual(receivedCandidates, ['candidate:2 1 udp 1677729535 203.0.113.10 54322 typ relay']);
+  assert.ok(ipcMessages.some((m) => m.host === 'webrtc-ip-leak'));
+
+  // 4. Tracker sendBeacon is blocked while normal first-party beacon passes
+  const sendBeacon = fakeNavigator.sendBeacon as (url: string, data?: string) => boolean;
+  sendBeacon('https://www.google-analytics.com/g/collect?v=2', 'x');
+  sendBeacon('https://example.com/telemetry', 'ok');
+  assert.deepEqual(beaconsSent, ['https://example.com/telemetry']);
+  assert.ok(ipcMessages.some((m) => m.host === 'beacon:www.google-analytics.com'));
+
+  // 5. Live __ferroxSetPrivacy toggles protections cleanly
+  const setPrivacy = sandbox.__ferroxSetPrivacy as (cfg: Record<string, boolean>) => void;
+  setPrivacy({ fingerprintProtection: false, globalPrivacyControl: false });
+  assert.equal(fakeNavigator.globalPrivacyControl, false);
+  assert.equal(gl.getParameter(37445), 'REAL_GPU_37445');
+});
+
 
 
 

@@ -75,7 +75,7 @@ export function SettingsView({
         <header className="pb-4 border-b border-white/8">
           <h1 className="font-display text-2xl font-semibold text-white">Browser Settings</h1>
           <p className="text-xs text-slate-400 mt-1">
-            Customize FerroX themes, hardware acceleration, search engine, and import profiles from Opera GX or Firefox.
+            Customize FerroX themes, hardware acceleration, search engine, and sync profiles from Chrome, Edge, Brave, Opera, Firefox, Vivaldi &amp; Safari.
           </p>
         </header>
 

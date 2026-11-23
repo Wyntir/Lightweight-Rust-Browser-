@@ -1,19 +1,22 @@
-import { memo } from 'react';
+import { memo, MouseEvent as ReactMouseEvent, useEffect, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
   Columns2,
+  Copy,
   EyeOff,
   Globe,
   PanelLeft,
   PauseCircle,
   Pin,
   Plus,
+  RotateCw,
   Search,
   Settings,
   Shield,
   Terminal,
   X,
+  XCircle,
 } from 'lucide-react';
 import { Tab, TabGroup } from '../lib/browserEngine';
 import ferroxLogo from '../assets/images/ferrox_logo_icon.png';
@@ -27,6 +30,10 @@ interface TabBarSharedProps {
   quickSettingsOpen: boolean;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;
+  onDuplicateTab: (id: string) => void;
+  onReloadTab: (id: string) => void;
+  onHibernateTab: (id: string) => void;
+  onCloseOtherTabs: (id: string) => void;
   onNewTab: () => void;
   onNewPrivateTab: () => void;
   onTogglePin: (id: string) => void;
@@ -35,6 +42,176 @@ interface TabBarSharedProps {
   onOpenTabSearch: () => void;
   onToggleVerticalTabs: () => void;
   onToggleQuickSettings: () => void;
+  onContextMenuOpenChange?: (open: boolean) => void;
+}
+
+interface ContextMenuState {
+  tabId: string;
+  x: number;
+  y: number;
+}
+
+function TabContextMenu({
+  menu,
+  tabs,
+  activeTabId,
+  splitTabId,
+  onCloseMenu,
+  onDuplicateTab,
+  onReloadTab,
+  onTogglePin,
+  onToggleSplit,
+  onHibernateTab,
+  onCloseTab,
+  onCloseOtherTabs,
+}: {
+  menu: ContextMenuState;
+  tabs: Tab[];
+  activeTabId: string | null;
+  splitTabId: string | null;
+  onCloseMenu: () => void;
+  onDuplicateTab: (id: string) => void;
+  onReloadTab: (id: string) => void;
+  onTogglePin: (id: string) => void;
+  onToggleSplit: (id: string) => void;
+  onHibernateTab: (id: string) => void;
+  onCloseTab: (id: string) => void;
+  onCloseOtherTabs: (id: string) => void;
+}) {
+  const tab = tabs.find((t) => t.id === menu.tabId);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onCloseMenu();
+      }
+    };
+    const onWindowBlur = () => onCloseMenu();
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('blur', onWindowBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('blur', onWindowBlur);
+    };
+  }, [onCloseMenu]);
+
+  if (!tab) return null;
+
+  const isActive = tab.id === activeTabId;
+  const isSplit = tab.id === splitTabId;
+  const canHibernate = !isActive && !isSplit && !tab.hibernated;
+  const canCloseOthers = tabs.some((t) => t.id !== tab.id && !t.pinned);
+  const canReload = !tab.url.startsWith('ferrox://');
+
+  const menuWidth = 204;
+  const menuHeight = 256;
+  const left = Math.max(8, Math.min(menu.x, window.innerWidth - menuWidth - 8));
+  const top = Math.max(8, Math.min(menu.y, window.innerHeight - menuHeight - 8));
+
+  const runAction = (fn: () => void) => {
+    onCloseMenu();
+    fn();
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50"
+      onClick={onCloseMenu}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onCloseMenu();
+      }}
+    >
+      <div
+        role="menu"
+        aria-label={`Tab actions for ${tab.title}`}
+        onClick={(e) => e.stopPropagation()}
+        className="fx-pop-in fixed w-[204px] py-1.5 rounded-xl border border-white/15 shadow-2xl text-xs text-slate-200 select-none"
+        style={{ left, top, backgroundColor: 'var(--fx-panel)' }}
+      >
+        <div className="px-3 py-1 text-[10px] font-medium text-slate-400 truncate border-b border-white/8 mb-1">
+          {tab.title}
+        </div>
+
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => runAction(() => onDuplicateTab(tab.id))}
+          className="w-full flex items-center gap-2.5 px-3 py-1.5 text-left hover:bg-white/10 text-white transition-colors"
+        >
+          <Copy className="w-3.5 h-3.5 text-slate-300 shrink-0" aria-hidden="true" />
+          <span>Duplicate Tab</span>
+        </button>
+
+        <button
+          type="button"
+          role="menuitem"
+          disabled={!canReload}
+          onClick={() => runAction(() => onReloadTab(tab.id))}
+          className="w-full flex items-center gap-2.5 px-3 py-1.5 text-left hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent transition-colors"
+        >
+          <RotateCw className="w-3.5 h-3.5 text-slate-400 shrink-0" aria-hidden="true" />
+          <span>Reload Tab</span>
+        </button>
+
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => runAction(() => onTogglePin(tab.id))}
+          className="w-full flex items-center gap-2.5 px-3 py-1.5 text-left hover:bg-white/10 transition-colors"
+        >
+          <Pin className="w-3.5 h-3.5 text-slate-400 shrink-0" aria-hidden="true" />
+          <span>{tab.pinned ? 'Unpin Tab' : 'Pin Tab'}</span>
+        </button>
+
+        <button
+          type="button"
+          role="menuitem"
+          disabled={isActive && !isSplit}
+          onClick={() => runAction(() => onToggleSplit(tab.id))}
+          className="w-full flex items-center gap-2.5 px-3 py-1.5 text-left hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent transition-colors"
+        >
+          <Columns2 className="w-3.5 h-3.5 text-sky-400 shrink-0" aria-hidden="true" />
+          <span>{isSplit ? 'Exit Split View' : 'Open in Split View'}</span>
+        </button>
+
+        <button
+          type="button"
+          role="menuitem"
+          disabled={!canHibernate}
+          onClick={() => runAction(() => onHibernateTab(tab.id))}
+          className="w-full flex items-center gap-2.5 px-3 py-1.5 text-left hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent transition-colors"
+        >
+          <PauseCircle className="w-3.5 h-3.5 text-slate-400 shrink-0" aria-hidden="true" />
+          <span>{tab.hibernated ? 'Hibernated' : 'Hibernate Tab'}</span>
+        </button>
+
+        <div className="my-1 border-t border-white/8" />
+
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => runAction(() => onCloseTab(tab.id))}
+          className="w-full flex items-center gap-2.5 px-3 py-1.5 text-left hover:bg-rose-500/15 hover:text-rose-200 transition-colors"
+        >
+          <X className="w-3.5 h-3.5 text-slate-400 shrink-0" aria-hidden="true" />
+          <span>Close Tab</span>
+        </button>
+
+        <button
+          type="button"
+          role="menuitem"
+          disabled={!canCloseOthers}
+          onClick={() => runAction(() => onCloseOtherTabs(tab.id))}
+          className="w-full flex items-center gap-2.5 px-3 py-1.5 text-left hover:bg-rose-500/15 hover:text-rose-200 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-200 transition-colors"
+        >
+          <XCircle className="w-3.5 h-3.5 text-slate-400 shrink-0" aria-hidden="true" />
+          <span>Close Other Tabs</span>
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function getTabIcon(tab: Tab) {
@@ -77,6 +254,10 @@ export const TabStrip = memo(function TabStrip({
   quickSettingsOpen,
   onSelectTab,
   onCloseTab,
+  onDuplicateTab,
+  onReloadTab,
+  onHibernateTab,
+  onCloseOtherTabs,
   onNewTab,
   onNewPrivateTab,
   onTogglePin,
@@ -85,7 +266,19 @@ export const TabStrip = memo(function TabStrip({
   onOpenTabSearch,
   onToggleVerticalTabs,
   onToggleQuickSettings,
+  onContextMenuOpenChange,
 }: TabBarSharedProps) {
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+
+  useEffect(() => {
+    onContextMenuOpenChange?.(Boolean(contextMenu));
+  }, [contextMenu, onContextMenuOpenChange]);
+
+  const handleOpenContextMenu = (e: ReactMouseEvent, tabId: string) => {
+    e.preventDefault();
+    setContextMenu({ tabId, x: e.clientX, y: e.clientY });
+  };
+
   const orderedTabs = sortTabsPinnedFirst(tabs);
   const groupMap = new Map(tabGroups.map((g) => [g.id, g]));
 
@@ -183,6 +376,7 @@ export const TabStrip = memo(function TabStrip({
             return (
               <div
                 key={tab.id}
+                onContextMenu={(e) => handleOpenContextMenu(e, tab.id)}
                 className={`group flex items-center gap-0.5 h-8 rounded-t-md border transition-colors shrink-0 ${
                   isActive
                     ? 'bg-[#161B26] border-white/12 text-white'
@@ -219,7 +413,7 @@ export const TabStrip = memo(function TabStrip({
                   className={`flex items-center gap-1.5 ${
                     tab.pinned ? 'px-2' : 'pl-2.5 pr-1'
                   } h-full text-xs font-medium focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40 rounded-tl-md whitespace-nowrap`}
-                  title={tab.hibernated ? `${tab.title} (Hibernated)` : tab.title}
+                  title={tab.hibernated ? `${tab.title} (Hibernated)` : `${tab.title} (Right-click for options)`}
                 >
                   {getTabIcon(tab)}
                   {!tab.pinned && (
@@ -338,6 +532,23 @@ export const TabStrip = memo(function TabStrip({
           <Settings className="w-3.5 h-3.5" aria-hidden="true" />
         </button>
       </div>
+
+      {contextMenu && (
+        <TabContextMenu
+          menu={contextMenu}
+          tabs={tabs}
+          activeTabId={activeTabId}
+          splitTabId={splitTabId}
+          onCloseMenu={() => setContextMenu(null)}
+          onDuplicateTab={onDuplicateTab}
+          onReloadTab={onReloadTab}
+          onTogglePin={onTogglePin}
+          onToggleSplit={onToggleSplit}
+          onHibernateTab={onHibernateTab}
+          onCloseTab={onCloseTab}
+          onCloseOtherTabs={onCloseOtherTabs}
+        />
+      )}
     </div>
   );
 });
@@ -349,13 +560,29 @@ export const VerticalTabRail = memo(function VerticalTabRail({
   splitTabId,
   onSelectTab,
   onCloseTab,
+  onDuplicateTab,
+  onReloadTab,
+  onHibernateTab,
+  onCloseOtherTabs,
   onNewTab,
   onNewPrivateTab,
   onTogglePin,
   onToggleSplit,
   onToggleGroupCollapse,
   onOpenTabSearch,
+  onContextMenuOpenChange,
 }: Omit<TabBarSharedProps, 'verticalTabs' | 'onToggleVerticalTabs' | 'quickSettingsOpen' | 'onToggleQuickSettings'>) {
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+
+  useEffect(() => {
+    onContextMenuOpenChange?.(Boolean(contextMenu));
+  }, [contextMenu, onContextMenuOpenChange]);
+
+  const handleOpenContextMenu = (e: ReactMouseEvent, tabId: string) => {
+    e.preventDefault();
+    setContextMenu({ tabId, x: e.clientX, y: e.clientY });
+  };
+
   const orderedTabs = sortTabsPinnedFirst(tabs);
   const groupMap = new Map(tabGroups.map((g) => [g.id, g]));
   const renderedCollapsedGroups = new Set<string>();
@@ -425,6 +652,7 @@ export const VerticalTabRail = memo(function VerticalTabRail({
           return (
             <div
               key={tab.id}
+              onContextMenu={(e) => handleOpenContextMenu(e, tab.id)}
               className={`group flex items-center gap-1 px-2 py-1.5 rounded-lg border transition-colors ${
                 isActive
                   ? 'bg-[#161B26] border-white/15 text-white'
@@ -478,6 +706,23 @@ export const VerticalTabRail = memo(function VerticalTabRail({
           );
         })}
       </div>
+
+      {contextMenu && (
+        <TabContextMenu
+          menu={contextMenu}
+          tabs={tabs}
+          activeTabId={activeTabId}
+          splitTabId={splitTabId}
+          onCloseMenu={() => setContextMenu(null)}
+          onDuplicateTab={onDuplicateTab}
+          onReloadTab={onReloadTab}
+          onTogglePin={onTogglePin}
+          onToggleSplit={onToggleSplit}
+          onHibernateTab={onHibernateTab}
+          onCloseTab={onCloseTab}
+          onCloseOtherTabs={onCloseOtherTabs}
+        />
+      )}
     </aside>
   );
 });

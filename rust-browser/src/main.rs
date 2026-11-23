@@ -310,6 +310,16 @@ struct IpcMessage {
     safe_browsing: Option<bool>,
     #[serde(rename = "fingerprintProtection")]
     fingerprint_protection: Option<bool>,
+    #[serde(rename = "webrtcIpProtection")]
+    webrtc_ip_protection: Option<bool>,
+    #[serde(rename = "stripTrackingParams")]
+    strip_tracking_params: Option<bool>,
+    #[serde(rename = "blockCryptominers")]
+    block_cryptominers: Option<bool>,
+    #[serde(rename = "globalPrivacyControl")]
+    global_privacy_control: Option<bool>,
+    #[serde(rename = "blockHyperlinkAuditing")]
+    block_hyperlink_auditing: Option<bool>,
     #[serde(rename = "vpnEnabled")]
     vpn_enabled: Option<bool>,
     #[serde(rename = "vpnRegion")]
@@ -553,7 +563,7 @@ fn spawn_tab_webview(
     let base_builder = if is_private {
         WebViewBuilder::new()
     } else {
-        WebViewBuilder::new_with_web_context(shared_web_context)
+        WebViewBuilder::with_web_context(shared_web_context)
     };
 
     let builder = base_builder
@@ -592,7 +602,7 @@ fn spawn_tab_webview(
                 });
             }
         })
-        .with_download_started_handler(move |url, destination_path| {
+        .with_download_started_handler(move |url: String, destination_path: &mut PathBuf| {
             let filename = derive_download_filename(&url, destination_path);
             let needs_dir = destination_path.is_relative()
                 || destination_path
@@ -616,7 +626,7 @@ fn spawn_tab_webview(
             });
             true
         })
-        .with_download_completed_handler(move |url, saved_path, success| {
+        .with_download_completed_handler(move |url: String, saved_path: Option<PathBuf>, success: bool| {
             let _ = dl_done_proxy.send_event(UserEvent::DownloadCompleted {
                 url,
                 path: saved_path.map(|p| p.to_string_lossy().into_owned()),
@@ -640,14 +650,53 @@ fn shield_sync_js(shield: &AdShield) -> String {
     )
 }
 
-fn build_tab_init_script(base_init_script: &str, shield: &AdShield) -> String {
-    format!("{}\n{}", base_init_script, shield_sync_js(shield))
+fn privacy_sync_js(privacy: &PrivacyConfig) -> String {
+    format!(
+        "if (window.__ferroxSetPrivacy) window.__ferroxSetPrivacy({{ fingerprintProtection: {}, webrtcIpProtection: {}, globalPrivacyControl: {}, blockHyperlinkAuditing: {} }});",
+        if privacy.fingerprint_protection { "true" } else { "false" },
+        if privacy.webrtc_ip_protection { "true" } else { "false" },
+        if privacy.global_privacy_control { "true" } else { "false" },
+        if privacy.block_hyperlink_auditing { "true" } else { "false" },
+    )
+}
+
+fn build_tab_init_script(
+    base_init_script: &str,
+    shield: &AdShield,
+    privacy: &PrivacyConfig,
+) -> String {
+    format!(
+        "{}\n{}\n{}",
+        base_init_script,
+        shield_sync_js(shield),
+        privacy_sync_js(privacy)
+    )
 }
 
 fn broadcast_shield_state(shield: &AdShield, tab_webviews: &HashMap<String, WebView>) {
     let script = shield_sync_js(shield);
     for wv in tab_webviews.values() {
         let _ = wv.evaluate_script(&script);
+    }
+}
+
+fn broadcast_privacy_state(privacy: &PrivacyConfig, tab_webviews: &HashMap<String, WebView>) {
+    let script = privacy_sync_js(privacy);
+    for wv in tab_webviews.values() {
+        let _ = wv.evaluate_script(&script);
+    }
+}
+
+fn emit_stripped_tracker_notice(chrome: &WebView, shield: &mut AdShield, clean_url: &str, count: usize) {
+    if count == 0 {
+        return;
+    }
+    shield.record_block(clean_url);
+    if let Ok(json_url) = serde_json::to_string(clean_url) {
+        let _ = chrome.evaluate_script(&format!(
+            "if (window.__ferroxAdBlocked) window.__ferroxAdBlocked({{ host: \"url-tracker-stripped\", url: {} }});",
+            json_url
+        ));
     }
 }
 
@@ -962,6 +1011,14 @@ fn main() {
             Event::UserEvent(UserEvent::TabOpenSameWindow { tab_id, url }) => {
                 let assessment = state.security.evaluate_navigation(&url);
                 if assessment.safe && !state.shield.is_blocked(&assessment.upgraded_url) {
+                    if assessment.stripped_trackers > 0 {
+                        emit_stripped_tracker_notice(
+                            &chrome_webview,
+                            &mut state.shield,
+                            &assessment.upgraded_url,
+                            assessment.stripped_trackers,
+                        );
+                    }
                     if let Some(wv) = tab_webviews.get(&tab_id) {
                         let _ = wv.load_url(&assessment.upgraded_url);
                     }
@@ -1184,6 +1241,14 @@ fn main() {
                                 layout_only = true;
                             } else {
                                 let is_background = msg.visible == Some(false);
+                                if assessment.stripped_trackers > 0 {
+                                    emit_stripped_tracker_notice(
+                                        &chrome_webview,
+                                        &mut state.shield,
+                                        &assessment.upgraded_url,
+                                        assessment.stripped_trackers,
+                                    );
+                                }
                                 if !is_background {
                                     state.active_tab_key = Some(tab_key.clone());
                                     state.content_visible = true;
@@ -1192,8 +1257,11 @@ fn main() {
                                     let _ = existing_wv.load_url(&assessment.upgraded_url);
                                 } else {
                                     let bounds = compute_content_bounds_tuple(&state, &window);
-                                    let tab_init =
-                                        build_tab_init_script(&combined_init_script, &state.shield);
+                                    let tab_init = build_tab_init_script(
+                                        &combined_init_script,
+                                        &state.shield,
+                                        &state.privacy,
+                                    );
                                     if let Ok(wv) = spawn_tab_webview(
                                         &tab_key,
                                         &assessment.upgraded_url,
@@ -1237,10 +1305,19 @@ fn main() {
                                     if assessment.safe
                                         && !state.shield.is_blocked(&assessment.upgraded_url)
                                     {
+                                        if assessment.stripped_trackers > 0 {
+                                            emit_stripped_tracker_notice(
+                                                &chrome_webview,
+                                                &mut state.shield,
+                                                &assessment.upgraded_url,
+                                                assessment.stripped_trackers,
+                                            );
+                                        }
                                         let bounds = compute_content_bounds_tuple(&state, &window);
                                         let tab_init = build_tab_init_script(
                                             &combined_init_script,
                                             &state.shield,
+                                            &state.privacy,
                                         );
                                         if let Ok(wv) = spawn_tab_webview(
                                             &tab_key,
@@ -1477,8 +1554,24 @@ fn main() {
                         if let Some(safe_browsing) = msg.safe_browsing {
                             state.security.safe_browsing_enabled = safe_browsing;
                         }
+                        if let Some(strip) = msg.strip_tracking_params {
+                            state.security.strip_tracking_params = strip;
+                            state.privacy.strip_tracking_params = strip;
+                        }
                         if let Some(fp) = msg.fingerprint_protection {
                             state.privacy.fingerprint_protection = fp;
+                        }
+                        if let Some(webrtc) = msg.webrtc_ip_protection {
+                            state.privacy.webrtc_ip_protection = webrtc;
+                        }
+                        if let Some(miners) = msg.block_cryptominers {
+                            state.privacy.block_cryptominers = miners;
+                        }
+                        if let Some(gpc) = msg.global_privacy_control {
+                            state.privacy.global_privacy_control = gpc;
+                        }
+                        if let Some(ping_block) = msg.block_hyperlink_auditing {
+                            state.privacy.block_hyperlink_auditing = ping_block;
                         }
                         if let Some(vpn_on) = msg.vpn_enabled {
                             state.core.config.vpn_enabled = vpn_on;
@@ -1488,6 +1581,7 @@ fn main() {
                             state.core.config.vpn_region = vpn_reg.clone();
                             state.privacy.vpn_region = vpn_reg;
                         }
+                        broadcast_privacy_state(&state.privacy, &tab_webviews);
                         let _ = state.core.config.save();
                     }
                     _ => {}

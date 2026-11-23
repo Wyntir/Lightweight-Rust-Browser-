@@ -243,4 +243,90 @@ test('serializeSessionTabs and restoreSessionTabs exclude private tabs and sanit
   assert.equal(restored[1].pinned, true);
 });
 
+import { stripTrackingQueryParams } from './browserEngine';
+import { inferBrowserSourceFromPath } from './profileImporter';
+
+test('stripTrackingQueryParams and evaluateUrlSecurity strip tracking params and block @-tricks, dangerous schemes, and cryptominers', () => {
+  const cleaned = stripTrackingQueryParams(
+    'https://example.com/article?id=42&utm_source=newsletter&fbclid=abc123&gclid=xyz'
+  );
+  assert.equal(cleaned.cleanUrl, 'https://example.com/article?id=42');
+  assert.equal(cleaned.strippedCount, 3);
+
+  const sec = evaluateUrlSecurity(
+    'http://example.com/page?q=rust&utm_medium=social&mc_eid=999',
+    true,
+    true,
+    true
+  );
+  assert.equal(sec.safe, true);
+  assert.equal(sec.upgradedUrl, 'https://example.com/page?q=rust');
+  assert.equal(sec.strippedTrackers, 2);
+
+  const atTrick = evaluateUrlSecurity('https://google.com@evil-login.example/auth', true, true, true);
+  assert.equal(atTrick.safe, false);
+  assert.equal(atTrick.threatType, 'phishing');
+
+  const jsScheme = evaluateUrlSecurity('javascript:alert(document.cookie)', true, true, true);
+  assert.equal(jsScheme.safe, false);
+  assert.equal(jsScheme.threatType, 'malware');
+
+  const miner = evaluateUrlSecurity('https://coinhive.com/lib/coinhive.min.js', true, true, true);
+  assert.equal(miner.safe, false);
+  assert.equal(miner.threatType, 'malware');
+});
+
+test('profileImporter supports Chrome, Edge, Brave, Vivaldi, and Safari exports and path inference', () => {
+  assert.equal(inferBrowserSourceFromPath('Google/Chrome/User Data/Default/Bookmarks'), 'chrome');
+  assert.equal(inferBrowserSourceFromPath('Microsoft/Edge/User Data/Profile 1/Bookmarks'), 'edge');
+  assert.equal(inferBrowserSourceFromPath('BraveSoftware/Brave-Browser/Default/Bookmarks'), 'brave');
+  assert.equal(inferBrowserSourceFromPath('Opera Software/Opera GX Stable/Bookmarks'), 'operagx');
+  assert.equal(inferBrowserSourceFromPath('LibreWolf/Profiles/abc.default/bookmarks-2026.json'), 'firefox');
+  assert.equal(inferBrowserSourceFromPath('Library/Safari/Bookmarks.plist'), 'safari');
+
+  const chromeSample = getSampleProfileData('chrome');
+  assert.ok(chromeSample.bookmarks.length >= 3);
+  assert.equal(chromeSample.bookmarks[0].category, 'Bookmarks bar');
+
+  const braveSample = getSampleProfileData('brave');
+  assert.ok(braveSample.bookmarks.length >= 2);
+
+  const safariPlist = `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>URLString</key><string>https://webkit.org</string><key>title</key><string>WebKit</string></dict></plist>`;
+  const safariParsed = parseProfilePayload(safariPlist, 'Bookmarks.plist', 'safari');
+  assert.equal(safariParsed.bookmarks.length, 1);
+  assert.equal(safariParsed.bookmarks[0].url, 'https://webkit.org');
+  assert.equal(safariParsed.bookmarks[0].title, 'WebKit');
+});
+
+import { duplicateTab } from './browserEngine';
+
+test('duplicateTab clones tab URL, title, workspace, group, privacy, and history cleanly', () => {
+  const original = {
+    ...tabHistoryNavigate(
+      createTab('tab-1', 'development', 'https://docs.rs', 1000, { isPrivate: true, groupId: 'grp-1' }),
+      'https://crates.io',
+      'Crates.io',
+      2000
+    ),
+    pinned: true,
+    hibernated: true,
+  };
+
+  const copy = duplicateTab(original, 'tab-2', 3000);
+  assert.equal(copy.id, 'tab-2');
+  assert.equal(copy.url, 'https://crates.io');
+  assert.equal(copy.title, 'Crates.io');
+  assert.equal(copy.workspace, 'development');
+  assert.equal(copy.groupId, 'grp-1');
+  assert.equal(copy.isPrivate, true);
+  assert.equal(copy.pinned, false);
+  assert.equal(copy.hibernated, false);
+  assert.deepEqual(copy.history, original.history);
+  assert.notEqual(copy.history, original.history);
+  assert.equal(copy.historyIndex, original.historyIndex);
+});
+
+
+
 

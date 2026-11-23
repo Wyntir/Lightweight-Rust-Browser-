@@ -24,7 +24,49 @@ const DEFAULT_TRACKER_DOMAINS = [
   'hotjar.com',
   'segment.io',
   'ads.twitter.com',
+  'coinhive.com',
+  'coin-hive.com',
+  'cryptoloot.pro',
+  'crypto-loot.com',
+  'webminepool.com',
+  'minero.cc',
+  'jsecoin.com',
 ];
+
+const TRACKING_QUERY_PARAMS = new Set([
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_term',
+  'utm_content',
+  'utm_id',
+  'fbclid',
+  'gclid',
+  'dclid',
+  'msclkid',
+  'mc_eid',
+  'mc_cid',
+  'yclid',
+  'igshid',
+  '_hsenc',
+  '_hsmi',
+  'mkt_tok',
+  'ref_src',
+]);
+
+function stripTrackingParams(urlObj: URL): number {
+  const keys: string[] = [];
+  urlObj.searchParams.forEach((_v, k) => {
+    const lower = k.toLowerCase();
+    if (lower.startsWith('utm_') || TRACKING_QUERY_PARAMS.has(lower)) {
+      keys.push(k);
+    }
+  });
+  for (const k of keys) {
+    urlObj.searchParams.delete(k);
+  }
+  return keys.length;
+}
 
 function isPrivateOrBlockedHost(hostname: string): boolean {
   const lower = hostname.toLowerCase();
@@ -185,13 +227,15 @@ function sanitizeAndRewriteHtml(
     }
   );
 
-  cleaned = cleaned.replace(
-    /\btarget\s*=\s*(?:"(?:_blank|_new|blank)"|'(?:_blank|_new|blank)'|(?:_blank|_new))/gi,
-    'target="_self"'
-  );
+  cleaned = cleaned
+    .replace(
+      /\btarget\s*=\s*(?:"(?:_blank|_new|blank)"|'(?:_blank|_new|blank)'|(?:_blank|_new))/gi,
+      'target="_self"'
+    )
+    .replace(/\sping\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
 
   const fingerprintScript = fingerprintProtection
-    ? `try { Object.defineProperty(navigator, 'hardwareConcurrency', { get: function() { return 4; } }); Object.defineProperty(navigator, 'deviceMemory', { get: function() { return 4; } }); } catch(_e) {}`
+    ? `try { Object.defineProperty(navigator, 'globalPrivacyControl', { get: function() { return true; } }); Object.defineProperty(navigator, 'doNotTrack', { get: function() { return '1'; } }); Object.defineProperty(navigator, 'hardwareConcurrency', { get: function() { return 4; } }); Object.defineProperty(navigator, 'deviceMemory', { get: function() { return 4; } }); } catch(_e) {}`
     : '';
 
   const bridgeScript = `
@@ -562,6 +606,11 @@ async function startServer() {
       });
     }
 
+    const stripTrackers = req.query.stripTrackers !== '0';
+    if (stripTrackers) {
+      stripTrackingParams(parsed);
+    }
+
     const trackerHit = shieldEnabled ? matchesTrackerDomain(parsed.toString(), customRules) : null;
     if (trackerHit) {
       return res.status(200).json({
@@ -580,6 +629,9 @@ async function startServer() {
       });
     }
 
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+
     const startTime = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
@@ -593,6 +645,8 @@ async function startServer() {
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
           Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.9',
+          'Sec-GPC': '1',
+          DNT: '1',
         },
       });
 
