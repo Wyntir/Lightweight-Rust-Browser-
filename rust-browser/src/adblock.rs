@@ -68,9 +68,13 @@ impl AdShield {
             return false;
         };
         let host_lower = host.to_ascii_lowercase();
-        self.blocked_domains
-            .iter()
-            .any(|rule| host_lower == *rule || host_lower.ends_with(&format!(".{}", rule)))
+        let host_bytes = host_lower.as_bytes();
+        self.blocked_domains.iter().any(|rule| {
+            host_lower == *rule
+                || (host_lower.len() > rule.len()
+                    && host_lower.ends_with(rule.as_str())
+                    && host_bytes[host_lower.len() - rule.len() - 1] == b'.')
+        })
     }
 
     pub fn record_block(&mut self, url: &str) {
@@ -455,48 +459,63 @@ impl AdShield {
     }
   } catch (_e) {}
 
-  // Layer 3 & 4: Cosmetic CSS + SSAI Video Ad Auto-Skip Failsafe on YouTube
+  // Layer 3 & 4: Cosmetic CSS + SSAI Video Ad Auto-Skip Failsafe on YouTube (rAF-throttled for 60fps playback)
   var adActive = false;
   var prevMuted = false;
+  var sweepScheduled = false;
+  var lastSweepAt = 0;
 
   function sweepYouTubePlayerAds() {
+    sweepScheduled = false;
     if (!window.__ferroxShieldEnabled || !isYouTubeHost()) return;
+    if (document.hidden && !adActive) return;
+    lastSweepAt = Date.now();
     applyCosmeticStyle();
 
     var player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
-    var video = document.querySelector('video.html5-main-video') || document.querySelector('video');
     var isAdNow = Boolean(
       player && (player.classList.contains('ad-showing') || player.classList.contains('ad-interrupting'))
     );
 
-    if (isAdNow && video) {
-      if (!adActive) {
-        adActive = true;
-        prevMuted = Boolean(video.muted);
-        reportBlocked('youtube-video-ad', window.location.href);
+    if (isAdNow) {
+      var video =
+        (player && typeof player.querySelector === 'function' && player.querySelector('video.html5-main-video')) ||
+        document.querySelector('video.html5-main-video') ||
+        document.querySelector('video');
+      if (video) {
+        if (!adActive) {
+          adActive = true;
+          prevMuted = Boolean(video.muted);
+          reportBlocked('youtube-video-ad', window.location.href);
+        }
+        video.muted = true;
+        if (Number.isFinite(video.duration) && video.duration > 0.2 && video.currentTime < video.duration - 0.15) {
+          try { video.currentTime = video.duration - 0.05; } catch (_e) {}
+        }
+        try {
+          if (video.playbackRate < 16) video.playbackRate = 16;
+        } catch (_e) {}
       }
-      video.muted = true;
-      if (Number.isFinite(video.duration) && video.duration > 0.2 && video.currentTime < video.duration - 0.15) {
-        try { video.currentTime = video.duration - 0.05; } catch (_e) {}
-      }
-      try {
-        if (video.playbackRate < 16) video.playbackRate = 16;
-      } catch (_e) {}
       var skipBtns = document.querySelectorAll(
         '.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-ad-skip-button-slot button'
       );
       for (var i = 0; i < skipBtns.length; i++) {
         try { skipBtns[i].click(); } catch (_e) {}
       }
-    } else if (adActive && video) {
+      var closeOverlays = document.querySelectorAll('.ytp-ad-overlay-close-button');
+      for (var j = 0; j < closeOverlays.length; j++) {
+        try { closeOverlays[j].click(); } catch (_e) {}
+      }
+    } else if (adActive) {
+      var restoredVideo =
+        (player && typeof player.querySelector === 'function' && player.querySelector('video.html5-main-video')) ||
+        document.querySelector('video.html5-main-video') ||
+        document.querySelector('video');
       adActive = false;
-      video.muted = prevMuted;
-      try { video.playbackRate = 1; } catch (_e) {}
-    }
-
-    var closeOverlays = document.querySelectorAll('.ytp-ad-overlay-close-button');
-    for (var j = 0; j < closeOverlays.length; j++) {
-      try { closeOverlays[j].click(); } catch (_e) {}
+      if (restoredVideo) {
+        restoredVideo.muted = prevMuted;
+        try { restoredVideo.playbackRate = 1; } catch (_e) {}
+      }
     }
 
     // Dismiss YouTube anti-adblock popup if it ever appears
@@ -508,9 +527,35 @@ impl AdShield {
       for (var b = 0; b < backdrops.length; b++) {
         if (backdrops[b].parentNode) backdrops[b].parentNode.removeChild(backdrops[b]);
       }
-      if (video && video.paused) {
-        try { video.play(); } catch (_e) {}
+      var pausedVideo =
+        (player && typeof player.querySelector === 'function' && player.querySelector('video.html5-main-video')) ||
+        document.querySelector('video.html5-main-video') ||
+        document.querySelector('video');
+      if (pausedVideo && pausedVideo.paused) {
+        try { pausedVideo.play(); } catch (_e) {}
       }
+    }
+  }
+
+  function scheduleYouTubeSweep() {
+    if (sweepScheduled || !window.__ferroxShieldEnabled) return;
+    var elapsed = Date.now() - lastSweepAt;
+    if (elapsed < 120) {
+      sweepScheduled = true;
+      window.setTimeout(function() {
+        if (typeof window.requestAnimationFrame === 'function') {
+          window.requestAnimationFrame(sweepYouTubePlayerAds);
+        } else {
+          sweepYouTubePlayerAds();
+        }
+      }, 120 - elapsed);
+      return;
+    }
+    sweepScheduled = true;
+    if (typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(sweepYouTubePlayerAds);
+    } else {
+      window.setTimeout(sweepYouTubePlayerAds, 16);
     }
   }
 
@@ -519,9 +564,7 @@ impl AdShield {
     if (!isYouTubeHost()) return;
     sweepYouTubePlayerAds();
     if (typeof MutationObserver !== 'undefined' && document.documentElement) {
-      var observer = new MutationObserver(function() {
-        sweepYouTubePlayerAds();
-      });
+      var observer = new MutationObserver(scheduleYouTubeSweep);
       observer.observe(document.documentElement, {
         childList: true,
         subtree: true,
@@ -529,7 +572,11 @@ impl AdShield {
         attributeFilter: ['class']
       });
     }
-    window.setInterval(sweepYouTubePlayerAds, 350);
+    window.setInterval(function() {
+      if (!document.hidden || adActive) {
+        sweepYouTubePlayerAds();
+      }
+    }, 650);
   }
 
   if (document.readyState === 'loading') {

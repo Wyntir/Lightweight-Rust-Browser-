@@ -1,3 +1,4 @@
+import { memo, useEffect } from 'react';
 import { Cpu, Download, Palette, Settings, X } from 'lucide-react';
 import {
   ACCENT_THEMES,
@@ -24,7 +25,7 @@ interface QuickSettingsPopoverProps {
   onOpenFullSettings: () => void;
 }
 
-export function QuickSettingsPopover({
+export const QuickSettingsPopover = memo(function QuickSettingsPopover({
   open,
   accent,
   customAccentHex,
@@ -41,15 +42,29 @@ export function QuickSettingsPopover({
   onToggleBookmarksBar,
   onOpenFullSettings,
 }: QuickSettingsPopoverProps) {
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, onClose]);
+
   if (!open) return null;
 
   return (
-    <div
-      className="fx-pop-in fixed right-3 top-12 z-50 w-80 rounded-xl border border-white/15 shadow-2xl p-4 space-y-4"
-      style={{ backgroundColor: 'var(--fx-panel)' }}
-      role="dialog"
-      aria-label="Quick browser settings"
-    >
+    <div className="fixed inset-0 z-40" onClick={onClose}>
+      <div
+        className="fx-pop-in fixed right-3 top-12 z-50 w-80 rounded-xl border border-white/15 shadow-2xl p-4 space-y-4"
+        style={{ backgroundColor: 'var(--fx-panel)' }}
+        role="dialog"
+        aria-label="Quick browser settings"
+        onClick={(e) => e.stopPropagation()}
+      >
       <div className="flex items-center justify-between pb-2.5 border-b border-white/10">
         <div className="flex items-center gap-2 text-xs font-semibold text-white">
           <Settings className="w-3.5 h-3.5" style={{ color: 'var(--fx-accent)' }} aria-hidden="true" />
@@ -203,6 +218,7 @@ export function QuickSettingsPopover({
         <Download className="w-3.5 h-3.5" aria-hidden="true" />
         All Settings &amp; Profile Import
       </button>
+      </div>
     </div>
   );
-}
+});

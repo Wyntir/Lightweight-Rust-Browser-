@@ -1,4 +1,4 @@
-import { FormEvent, RefObject, useEffect, useState } from 'react';
+import { FormEvent, memo, RefObject, useEffect, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
@@ -68,7 +68,7 @@ interface AddressToolbarProps {
 
 const TRANSLATE_LANGUAGES = ['Spanish', 'French', 'German', 'Japanese', 'Portuguese'];
 
-export function AddressToolbar({
+export const AddressToolbar = memo(function AddressToolbar({
   currentUrl,
   isPrivateTab,
   canBack,
@@ -126,6 +126,15 @@ export function AddressToolbar({
   useEffect(() => {
     onPopoverOpenChange?.(permOpen || translateOpen);
   }, [onPopoverOpenChange, permOpen, translateOpen]);
+
+  useEffect(() => {
+    if (!translateOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setTranslateOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [translateOpen]);
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -424,4 +433,4 @@ export function AddressToolbar({
       </div>
     </div>
   );
-}
+});

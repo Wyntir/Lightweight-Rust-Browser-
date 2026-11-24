@@ -286,6 +286,10 @@ export default function App() {
   const lastLayoutKeyRef = useRef<string>('');
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  const pageCacheRef = useRef(pageCache);
+  pageCacheRef.current = pageCache;
   const openTabFromNativeRef = useRef<(url: string, background: boolean) => void>(() => {});
   const executeShortcutRef = useRef<(cmd: BrowserShortcutCommand) => void>(() => {});
 
@@ -735,9 +739,12 @@ export default function App() {
   ]);
 
   // Progress active downloads smoothly (native WebView2 downloads cap at 85% until native DownloadCompleted fires)
+  const hasActiveDownloads = useMemo(
+    () => downloads.some((d) => d.status === 'downloading'),
+    [downloads]
+  );
   useEffect(() => {
-    const hasDownloading = downloads.some((d) => d.status === 'downloading');
-    if (!hasDownloading) return;
+    if (!hasActiveDownloads) return;
     const timer = setInterval(() => {
       setDownloads((prev) =>
         prev.map((d) => {
@@ -757,7 +764,7 @@ export default function App() {
       );
     }, 550);
     return () => clearInterval(timer);
-  }, [downloads]);
+  }, [hasActiveDownloads]);
 
   const budget = useMemo(
     () => evaluateResourceBudget(tabs, activeTabId, limiter, splitTabId),
@@ -902,33 +909,44 @@ export default function App() {
 
       const targetUrl = sec.upgradedUrl;
       if (sec.strippedTrackers > 0) {
-        setBlockedEvents((prev) => [
-          {
-            id: `blk-utm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            host: `url-tracker-stripped (${sec.strippedTrackers})`,
-            pageUrl: targetUrl,
-            timestamp: Date.now(),
-          },
-          ...prev,
-        ]);
+        setBlockedEvents((prev) =>
+          [
+            {
+              id: `blk-utm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              host: `url-tracker-stripped (${sec.strippedTrackers})`,
+              pageUrl: targetUrl,
+              timestamp: Date.now(),
+            },
+            ...prev,
+          ].slice(0, 200)
+        );
       }
       if (sec.upgradedFromHttp || targetUrl !== url) {
         setTabs((prev) =>
-          prev.map((t) => (t.id === tabId ? { ...t, url: targetUrl } : t))
+          prev.map((t) => {
+            if (t.id !== tabId) return t;
+            const nextHistory = [...t.history];
+            if (t.historyIndex >= 0 && t.historyIndex < nextHistory.length) {
+              nextHistory[t.historyIndex] = targetUrl;
+            }
+            return { ...t, url: targetUrl, history: nextHistory };
+          })
         );
       }
 
       const blockCheck = shouldBlockUrl(targetUrl, shieldEnabled, trackerRules);
       if (blockCheck.blocked && blockCheck.matchedRule) {
-        setBlockedEvents((prev) => [
-          {
-            id: `blk-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            host: blockCheck.matchedRule!,
-            pageUrl: targetUrl,
-            timestamp: Date.now(),
-          },
-          ...prev,
-        ]);
+        setBlockedEvents((prev) =>
+          [
+            {
+              id: `blk-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              host: blockCheck.matchedRule!,
+              pageUrl: targetUrl,
+              timestamp: Date.now(),
+            },
+            ...prev,
+          ].slice(0, 200)
+        );
         setPageCache((prev) => ({
           ...prev,
           [tabId]: {
@@ -958,15 +976,17 @@ export default function App() {
         setErrorTabs((prev) => ({ ...prev, [tabId]: null }));
         setLoadingTabs((prev) => ({ ...prev, [tabId]: false }));
         if (!options?.isPrivate) {
-          setHistory((prev) => [
-            {
-              id: `hist-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-              title: deriveTitleFromUrl(targetUrl),
-              url: targetUrl,
-              visitedAt: Date.now(),
-            },
-            ...prev,
-          ]);
+          setHistory((prev) =>
+            [
+              {
+                id: `hist-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                title: deriveTitleFromUrl(targetUrl),
+                url: targetUrl,
+                visitedAt: Date.now(),
+              },
+              ...prev,
+            ].slice(0, 250)
+          );
         }
         return;
       }
@@ -999,6 +1019,9 @@ export default function App() {
           limitKbps: limiter.netEnabled ? String(limiter.netLimitKbps) : '0',
           rules: trackerRules.join(','),
         });
+        if (options?.forceReload) {
+          params.set('refresh', '1');
+        }
         const response = await fetch(`/api/browse?${params.toString()}`);
         const data = await response.json();
 
@@ -1037,28 +1060,32 @@ export default function App() {
         );
 
         if (loaded.blockedTrackers.length > 0) {
-          setBlockedEvents((prev) => [
-            ...loaded.blockedTrackers.map((host) => ({
-              id: `blk-${Date.now()}-${host}-${Math.random().toString(36).slice(2, 6)}`,
-              host,
-              pageUrl: loaded.finalUrl,
-              timestamp: Date.now(),
-            })),
-            ...prev,
-          ]);
+          setBlockedEvents((prev) =>
+            [
+              ...loaded.blockedTrackers.map((host) => ({
+                id: `blk-${Date.now()}-${host}-${Math.random().toString(36).slice(2, 6)}`,
+                host,
+                pageUrl: loaded.finalUrl,
+                timestamp: Date.now(),
+              })),
+              ...prev,
+            ].slice(0, 200)
+          );
         }
 
         // Private Browsing: never retain browsing history
         if (!options?.isPrivate) {
-          setHistory((prev) => [
-            {
-              id: `hist-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-              title: loaded.title,
-              url: loaded.finalUrl,
-              visitedAt: Date.now(),
-            },
-            ...prev,
-          ]);
+          setHistory((prev) =>
+            [
+              {
+                id: `hist-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                title: loaded.title,
+                url: loaded.finalUrl,
+                visitedAt: Date.now(),
+              },
+              ...prev,
+            ].slice(0, 250)
+          );
         }
       } catch (err) {
         setErrorTabs((prev) => ({
@@ -1160,7 +1187,8 @@ export default function App() {
 
   const handleCloseTab = useCallback(
     (id: string) => {
-      const closing = tabs.find((t) => t.id === id);
+      const currentTabs = tabsRef.current;
+      const closing = currentTabs.find((t) => t.id === id);
       if (closing && !closing.isPrivate) {
         closedTabsRef.current = [...closedTabsRef.current.slice(-24), closing];
       }
@@ -1186,39 +1214,33 @@ export default function App() {
         setPipTabId(null);
       }
 
-      if (id === activeTabId) {
-        const wsRemaining = tabs.filter((t) => t.id !== id && t.workspace === activeWorkspace);
-        const fallback = wsRemaining[wsRemaining.length - 1];
+      const remaining = currentTabs.filter((t) => t.id !== id);
+      const wsRemaining = remaining.filter((t) => t.workspace === activeWorkspace);
+
+      if (wsRemaining.length === 0) {
+        const replacement = createTab(
+          `tab-${tabCounterRef.current++}`,
+          activeWorkspace,
+          'ferrox://speed-dial'
+        );
+        setTabs([...remaining, replacement]);
+        setActiveTabId(replacement.id);
         if (isRustNativeShell()) {
-          if (fallback) {
-            rustActivateTab(fallback.id, fallback.url, fallback.isPrivate);
-          } else {
-            sendToRust('set_active_url', { url: 'ferrox://speed-dial' });
-          }
+          sendToRust('set_active_url', { url: 'ferrox://speed-dial' });
         }
+        return;
       }
 
-      setTabs((prev) => {
-        const remaining = prev.filter((t) => t.id !== id);
-        const wsRemaining = remaining.filter((t) => t.workspace === activeWorkspace);
-
-        if (wsRemaining.length === 0) {
-          const replacement = createTab(
-            `tab-${tabCounterRef.current++}`,
-            activeWorkspace,
-            'ferrox://speed-dial'
-          );
-          setActiveTabId(replacement.id);
-          return [...remaining, replacement];
+      setTabs(remaining);
+      if (id === activeTabIdRef.current) {
+        const fallback = wsRemaining[wsRemaining.length - 1];
+        setActiveTabId(fallback.id);
+        if (isRustNativeShell()) {
+          rustActivateTab(fallback.id, fallback.url, fallback.isPrivate);
         }
-
-        if (id === activeTabId) {
-          setActiveTabId(wsRemaining[wsRemaining.length - 1].id);
-        }
-        return remaining;
-      });
+      }
     },
-    [activeTabId, activeWorkspace, pipTabId, splitTabId, tabs]
+    [activeWorkspace, pipTabId, splitTabId]
   );
 
   const handleReopenClosedTab = useCallback(() => {
@@ -1243,7 +1265,7 @@ export default function App() {
 
   const handleDuplicateTab = useCallback(
     (sourceId: string) => {
-      const source = tabs.find((t) => t.id === sourceId);
+      const source = tabsRef.current.find((t) => t.id === sourceId);
       if (!source) return;
       const newId = `tab-${tabCounterRef.current++}`;
       const cloned = duplicateTab(source, newId);
@@ -1262,7 +1284,7 @@ export default function App() {
         if (isRustNativeShell()) {
           rustNavigateTab(newId, cloned.url, { isPrivate: cloned.isPrivate, background: false });
         } else {
-          const cached = pageCache[sourceId];
+          const cached = pageCacheRef.current[sourceId];
           if (cached) {
             setPageCache((prev) => ({ ...prev, [newId]: cached }));
           } else {
@@ -1273,12 +1295,12 @@ export default function App() {
         rustActivateTab(newId, cloned.url, cloned.isPrivate);
       }
     },
-    [fetchExternalUrl, pageCache, tabs]
+    [fetchExternalUrl]
   );
 
   const handleReloadTabById = useCallback(
     (targetId: string) => {
-      const target = tabs.find((t) => t.id === targetId);
+      const target = tabsRef.current.find((t) => t.id === targetId);
       if (!target || target.url.startsWith('ferrox://')) return;
       if (isRustNativeShell()) {
         rustTabReload(target.id);
@@ -1289,12 +1311,12 @@ export default function App() {
         });
       }
     },
-    [fetchExternalUrl, tabs]
+    [fetchExternalUrl]
   );
 
   const handleHibernateTabById = useCallback(
     (tabId: string) => {
-      if (tabId === activeTabId || tabId === splitTabId) return;
+      if (tabId === activeTabIdRef.current || tabId === splitTabId) return;
       if (isRustNativeShell()) {
         rustHibernateTab(tabId);
       }
@@ -1304,12 +1326,13 @@ export default function App() {
         )
       );
     },
-    [activeTabId, splitTabId]
+    [splitTabId]
   );
 
   const handleCloseOtherTabs = useCallback(
     (keepId: string) => {
-      const toClose = tabs.filter(
+      const currentTabs = tabsRef.current;
+      const toClose = currentTabs.filter(
         (t) => t.workspace === activeWorkspace && t.id !== keepId && !t.pinned
       );
       if (toClose.length === 0) return;
@@ -1342,24 +1365,24 @@ export default function App() {
       }
       setTabs((prev) => prev.filter((t) => !closedIds.has(t.id)));
       setActiveTabId(keepId);
-      const kept = tabs.find((t) => t.id === keepId);
+      const kept = currentTabs.find((t) => t.id === keepId);
       if (kept && isRustNativeShell()) {
         rustActivateTab(kept.id, kept.url, kept.isPrivate);
       }
     },
-    [activeWorkspace, pipTabId, splitTabId, tabs]
+    [activeWorkspace, pipTabId, splitTabId]
   );
 
   const handleSelectWorkspace = useCallback(
     (ws: WorkspaceId) => {
       setActiveWorkspace(ws);
       setSplitTabId(null);
-      const existing = tabs.find((t) => t.workspace === ws);
+      const existing = tabsRef.current.find((t) => t.workspace === ws);
       if (existing) {
         setActiveTabId(existing.id);
         if (isRustNativeShell()) {
           rustActivateTab(existing.id, existing.url, existing.isPrivate);
-        } else if (!existing.url.startsWith('ferrox://') && !pageCache[existing.id]) {
+        } else if (!existing.url.startsWith('ferrox://') && !pageCacheRef.current[existing.id]) {
           void fetchExternalUrl(existing.id, existing.url, { isPrivate: existing.isPrivate });
         }
       } else {
@@ -1371,12 +1394,12 @@ export default function App() {
         }
       }
     },
-    [fetchExternalUrl, pageCache, tabs]
+    [fetchExternalUrl]
   );
 
   const handleSelectTab = useCallback(
     (id: string) => {
-      const target = tabs.find((t) => t.id === id);
+      const target = tabsRef.current.find((t) => t.id === id);
       if (target && target.workspace !== activeWorkspace) {
         setActiveWorkspace(target.workspace);
       }
@@ -1390,12 +1413,12 @@ export default function App() {
         if (isRustNativeShell()) {
           // Activate existing per-tab WebView WITHOUT reloading it!
           rustActivateTab(target.id, target.url, target.isPrivate);
-        } else if (!target.url.startsWith('ferrox://') && !pageCache[id]) {
+        } else if (!target.url.startsWith('ferrox://') && !pageCacheRef.current[id]) {
           void fetchExternalUrl(id, target.url, { isPrivate: target.isPrivate });
         }
       }
     },
-    [activeWorkspace, fetchExternalUrl, pageCache, tabs]
+    [activeWorkspace, fetchExternalUrl]
   );
 
   const handleBack = useCallback(() => {
@@ -1960,6 +1983,80 @@ export default function App() {
     [activeTab?.id, budget.tabs, pageCache, splitTab?.id]
   );
 
+  const handleNewDefaultTab = useCallback(() => handleNewTab('ferrox://speed-dial', false), [handleNewTab]);
+  const handleNewPrivateTab = useCallback(() => handleNewTab('ferrox://speed-dial', true), [handleNewTab]);
+  const handleTogglePin = useCallback((id: string) => {
+    setTabs((prev) => prev.map((t) => (t.id === id ? { ...t, pinned: !t.pinned } : t)));
+  }, []);
+  const handleToggleSplit = useCallback((id: string) => {
+    setSplitTabId((curr) => (curr === id ? null : id === activeTabIdRef.current ? null : id));
+  }, []);
+  const handleToggleGroupCollapse = useCallback((groupId: string) => {
+    setTabGroups((prev) =>
+      prev.map((g) => (g.id === groupId ? { ...g, collapsed: !g.collapsed } : g))
+    );
+  }, []);
+  const handleOpenTabSearch = useCallback(() => setTabSearchOpen(true), []);
+  const handleToggleVerticalTabs = useCallback(() => setVerticalTabs((v) => !v), []);
+  const handleToggleQuickSettings = useCallback(() => setQuickSettingsOpen((o) => !o), []);
+  const handleCloseQuickSettings = useCallback(() => setQuickSettingsOpen(false), []);
+  const handleToggleHardwareAcceleration = useCallback(() => {
+    setPrivacyConfig((p) => ({ ...p, hardwareAcceleration: !p.hardwareAcceleration }));
+  }, []);
+  const handleToggleBookmarksBar = useCallback(() => setShowBookmarksBar((b) => !b), []);
+  const handleOpenFullSettings = useCallback(() => handleOpenUrl('ferrox://settings'), [handleOpenUrl]);
+  const handleResetZoom = useCallback(() => handleAdjustZoom('reset'), [handleAdjustZoom]);
+  const handleChangeSitePermission = useCallback(
+    (origin: string, key: keyof SitePermissions, val: PermissionValue) => {
+      setSitePermissionsMap((prev) => ({
+        ...prev,
+        [origin]: { ...(prev[origin] ?? DEFAULT_SITE_PERMISSIONS), [key]: val },
+      }));
+    },
+    []
+  );
+  const handleHome = useCallback(() => handleOpenUrl('ferrox://speed-dial'), [handleOpenUrl]);
+  const handleToggleReaderMode = useCallback(() => {
+    const id = activeTabIdRef.current;
+    if (!id) return;
+    setReaderModeTabs((prev) => ({ ...prev, [id]: !prev[id] }));
+  }, []);
+  const handleTranslateToolbar = useCallback(
+    (lang: string | null) => void handleTranslateActiveTab(lang),
+    [handleTranslateActiveTab]
+  );
+  const handleTogglePip = useCallback(() => {
+    const id = activeTabIdRef.current;
+    if (!id) return;
+    setPipTabId((curr) => (curr === id ? null : id));
+  }, []);
+  const handleOpenDownloads = useCallback(() => handleOpenHubSection('downloads'), [handleOpenHubSection]);
+  const handleOpenExtensions = useCallback(() => handleOpenHubSection('extensions'), [handleOpenHubSection]);
+  const handleOpenBookmarksManager = useCallback(() => handleOpenHubSection('bookmarks'), [handleOpenHubSection]);
+  const handleOpenShield = useCallback(() => {
+    setActiveDrawer((d) => (d === 'privacy' ? null : 'privacy'));
+  }, []);
+  const handleOpenLimiter = useCallback(() => {
+    setActiveDrawer((d) => (d === 'limiter' ? null : 'limiter'));
+  }, []);
+  const handleUnpinFromBar = useCallback((id: string) => {
+    setBookmarks((prev) =>
+      prev.map((b) => (b.id === id ? { ...b, pinnedToBar: false } : b))
+    );
+  }, []);
+  const handleToggleDrawer = useCallback((drawer: Exclude<DrawerTab, null>) => {
+    setActiveDrawer((curr) => (curr === drawer ? null : drawer));
+  }, []);
+
+  const activeDownloadsCount = useMemo(
+    () => downloads.filter((d) => d.status === 'downloading').length,
+    [downloads]
+  );
+  const enabledExtensionsCount = useMemo(
+    () => extensions.filter((e) => e.enabled).length,
+    [extensions]
+  );
+
   return (
     <div
       className="flex flex-col h-screen w-screen overflow-hidden text-[#ECEFF4]"
@@ -1979,22 +2076,14 @@ export default function App() {
         onReloadTab={handleReloadTabById}
         onHibernateTab={handleHibernateTabById}
         onCloseOtherTabs={handleCloseOtherTabs}
-        onNewTab={() => handleNewTab('ferrox://speed-dial', false)}
-        onNewPrivateTab={() => handleNewTab('ferrox://speed-dial', true)}
-        onTogglePin={(id) =>
-          setTabs((prev) => prev.map((t) => (t.id === id ? { ...t, pinned: !t.pinned } : t)))
-        }
-        onToggleSplit={(id) =>
-          setSplitTabId((curr) => (curr === id ? null : id === activeTab?.id ? null : id))
-        }
-        onToggleGroupCollapse={(groupId) =>
-          setTabGroups((prev) =>
-            prev.map((g) => (g.id === groupId ? { ...g, collapsed: !g.collapsed } : g))
-          )
-        }
-        onOpenTabSearch={() => setTabSearchOpen(true)}
-        onToggleVerticalTabs={() => setVerticalTabs((v) => !v)}
-        onToggleQuickSettings={() => setQuickSettingsOpen((o) => !o)}
+        onNewTab={handleNewDefaultTab}
+        onNewPrivateTab={handleNewPrivateTab}
+        onTogglePin={handleTogglePin}
+        onToggleSplit={handleToggleSplit}
+        onToggleGroupCollapse={handleToggleGroupCollapse}
+        onOpenTabSearch={handleOpenTabSearch}
+        onToggleVerticalTabs={handleToggleVerticalTabs}
+        onToggleQuickSettings={handleToggleQuickSettings}
         onContextMenuOpenChange={setTabContextMenuOpen}
       />
 
@@ -2006,16 +2095,14 @@ export default function App() {
         hardwareAcceleration={privacyConfig.hardwareAcceleration}
         verticalTabs={verticalTabs}
         showBookmarksBar={showBookmarksBar}
-        onClose={() => setQuickSettingsOpen(false)}
+        onClose={handleCloseQuickSettings}
         onChangeAccent={setAccent}
         onChangeCustomAccentHex={setCustomAccentHex}
         onChangeSurfaceTheme={setSurfaceTheme}
-        onToggleHardwareAcceleration={() =>
-          setPrivacyConfig((p) => ({ ...p, hardwareAcceleration: !p.hardwareAcceleration }))
-        }
-        onToggleVerticalTabs={() => setVerticalTabs((v) => !v)}
-        onToggleBookmarksBar={() => setShowBookmarksBar((b) => !b)}
-        onOpenFullSettings={() => handleOpenUrl('ferrox://settings')}
+        onToggleHardwareAcceleration={handleToggleHardwareAcceleration}
+        onToggleVerticalTabs={handleToggleVerticalTabs}
+        onToggleBookmarksBar={handleToggleBookmarksBar}
+        onOpenFullSettings={handleOpenFullSettings}
       />
 
       {/* Address & Control Toolbar */}
@@ -2038,45 +2125,30 @@ export default function App() {
         upgradedFromHttp={activePageData?.upgradedFromHttp}
         insecureHttp={activePageData?.insecureHttpWarning}
         blockedCount={blockedEvents.length}
-        activeDownloadsCount={downloads.filter((d) => d.status === 'downloading').length}
-        enabledExtensionsCount={extensions.filter((e) => e.enabled).length}
+        activeDownloadsCount={activeDownloadsCount}
+        enabledExtensionsCount={enabledExtensionsCount}
         totalRamMb={rustTelemetry?.ramMb ?? budget.totalRamMb}
         ramLimitMb={limiter.ramLimitMb}
         ramLimiterEnabled={limiter.ramEnabled}
         sitePermissions={sitePermissionsMap[activeOrigin] ?? DEFAULT_SITE_PERMISSIONS}
         omniboxInputRef={omniboxInputRef}
         zoomFactor={activeTab ? tabZooms[activeTab.id] ?? 1 : 1}
-        onResetZoom={() => handleAdjustZoom('reset')}
-        onChangeSitePermission={(origin, key: keyof SitePermissions, val: PermissionValue) =>
-          setSitePermissionsMap((prev) => ({
-            ...prev,
-            [origin]: { ...(prev[origin] ?? DEFAULT_SITE_PERMISSIONS), [key]: val },
-          }))
-        }
+        onResetZoom={handleResetZoom}
+        onChangeSitePermission={handleChangeSitePermission}
         onBack={handleBack}
         onForward={handleForward}
         onReload={handleReload}
-        onHome={() => handleOpenUrl('ferrox://speed-dial')}
+        onHome={handleHome}
         onNavigate={handleOpenUrl}
         onToggleBookmark={handleToggleBookmark}
-        onToggleBookmarksBar={() => setShowBookmarksBar((b) => !b)}
-        onToggleReaderMode={() => {
-          if (!activeTab) return;
-          setReaderModeTabs((prev) => ({ ...prev, [activeTab.id]: !prev[activeTab.id] }));
-        }}
-        onTranslatePage={(lang) => void handleTranslateActiveTab(lang)}
-        onTogglePip={() => {
-          if (!activeTab) return;
-          setPipTabId((curr) => (curr === activeTab.id ? null : activeTab.id));
-        }}
-        onOpenDownloads={() => handleOpenHubSection('downloads')}
-        onOpenExtensions={() => handleOpenHubSection('extensions')}
-        onOpenShield={() =>
-          setActiveDrawer((d) => (d === 'privacy' ? null : 'privacy'))
-        }
-        onOpenLimiter={() =>
-          setActiveDrawer((d) => (d === 'limiter' ? null : 'limiter'))
-        }
+        onToggleBookmarksBar={handleToggleBookmarksBar}
+        onToggleReaderMode={handleToggleReaderMode}
+        onTranslatePage={handleTranslateToolbar}
+        onTogglePip={handleTogglePip}
+        onOpenDownloads={handleOpenDownloads}
+        onOpenExtensions={handleOpenExtensions}
+        onOpenShield={handleOpenShield}
+        onOpenLimiter={handleOpenLimiter}
         onPopoverOpenChange={setToolbarPopoverOpen}
       />
 
@@ -2085,12 +2157,8 @@ export default function App() {
         <BookmarksBar
           bookmarks={bookmarks}
           onNavigate={handleOpenUrl}
-          onUnpinFromBar={(id) =>
-            setBookmarks((prev) =>
-              prev.map((b) => (b.id === id ? { ...b, pinnedToBar: false } : b))
-            )
-          }
-          onOpenManager={() => handleOpenHubSection('bookmarks')}
+          onUnpinFromBar={handleUnpinFromBar}
+          onOpenManager={handleOpenBookmarksManager}
         />
       )}
 
@@ -2113,10 +2181,8 @@ export default function App() {
           activeDrawer={activeDrawer}
           activeUrl={activeTab?.url ?? ''}
           vpnEnabled={privacyConfig.vpnEnabled}
-          onToggleDrawer={(drawer) =>
-            setActiveDrawer((curr) => (curr === drawer ? null : drawer))
-          }
-          onNavigateInternal={(url) => handleOpenUrl(url)}
+          onToggleDrawer={handleToggleDrawer}
+          onNavigateInternal={handleOpenUrl}
         />
 
         {verticalTabs && (
@@ -2131,22 +2197,12 @@ export default function App() {
             onReloadTab={handleReloadTabById}
             onHibernateTab={handleHibernateTabById}
             onCloseOtherTabs={handleCloseOtherTabs}
-            onNewTab={() => handleNewTab('ferrox://speed-dial', false)}
-            onNewPrivateTab={() => handleNewTab('ferrox://speed-dial', true)}
-            onTogglePin={(id) =>
-              setTabs((prev) =>
-                prev.map((t) => (t.id === id ? { ...t, pinned: !t.pinned } : t))
-              )
-            }
-            onToggleSplit={(id) =>
-              setSplitTabId((curr) => (curr === id ? null : id === activeTab?.id ? null : id))
-            }
-            onToggleGroupCollapse={(groupId) =>
-              setTabGroups((prev) =>
-                prev.map((g) => (g.id === groupId ? { ...g, collapsed: !g.collapsed } : g))
-              )
-            }
-            onOpenTabSearch={() => setTabSearchOpen(true)}
+            onNewTab={handleNewDefaultTab}
+            onNewPrivateTab={handleNewPrivateTab}
+            onTogglePin={handleTogglePin}
+            onToggleSplit={handleToggleSplit}
+            onToggleGroupCollapse={handleToggleGroupCollapse}
+            onOpenTabSearch={handleOpenTabSearch}
             onContextMenuOpenChange={setTabContextMenuOpen}
           />
         )}

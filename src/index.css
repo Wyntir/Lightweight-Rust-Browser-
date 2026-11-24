@@ -107,10 +107,10 @@ select option {
 
 .fx-tile {
   transition: transform 160ms var(--fx-ease), border-color 160ms ease, background-color 160ms ease;
-  will-change: transform;
 }
 
 .fx-tile:hover {
+  will-change: transform;
   transform: translateY(-2px);
 }
 

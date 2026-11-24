@@ -1,4 +1,4 @@
-import { memo, MouseEvent as ReactMouseEvent, useEffect, useState } from 'react';
+import { memo, MouseEvent as ReactMouseEvent, useEffect, useMemo, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -279,8 +279,8 @@ export const TabStrip = memo(function TabStrip({
     setContextMenu({ tabId, x: e.clientX, y: e.clientY });
   };
 
-  const orderedTabs = sortTabsPinnedFirst(tabs);
-  const groupMap = new Map(tabGroups.map((g) => [g.id, g]));
+  const orderedTabs = useMemo(() => sortTabsPinnedFirst(tabs), [tabs]);
+  const groupMap = useMemo(() => new Map(tabGroups.map((g) => [g.id, g])), [tabGroups]);
 
   // Track which collapsed groups we have already rendered an island chip for
   const renderedCollapsedGroups = new Set<string>();
@@ -377,6 +377,15 @@ export const TabStrip = memo(function TabStrip({
               <div
                 key={tab.id}
                 onContextMenu={(e) => handleOpenContextMenu(e, tab.id)}
+                onMouseDown={(e) => {
+                  if (e.button === 1) e.preventDefault();
+                }}
+                onAuxClick={(e) => {
+                  if (e.button === 1) {
+                    e.preventDefault();
+                    onCloseTab(tab.id);
+                  }
+                }}
                 className={`group flex items-center gap-0.5 h-8 rounded-t-md border transition-colors shrink-0 ${
                   isActive
                     ? 'bg-[#161B26] border-white/12 text-white'
@@ -583,8 +592,8 @@ export const VerticalTabRail = memo(function VerticalTabRail({
     setContextMenu({ tabId, x: e.clientX, y: e.clientY });
   };
 
-  const orderedTabs = sortTabsPinnedFirst(tabs);
-  const groupMap = new Map(tabGroups.map((g) => [g.id, g]));
+  const orderedTabs = useMemo(() => sortTabsPinnedFirst(tabs), [tabs]);
+  const groupMap = useMemo(() => new Map(tabGroups.map((g) => [g.id, g])), [tabGroups]);
   const renderedCollapsedGroups = new Set<string>();
 
   return (
@@ -624,7 +633,12 @@ export const VerticalTabRail = memo(function VerticalTabRail({
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-2 space-y-1">
+      <div
+        className="flex-1 overflow-y-auto p-2 space-y-1"
+        role="tablist"
+        aria-label="Browser tabs"
+        aria-orientation="vertical"
+      >
         {orderedTabs.map((tab) => {
           const group = tab.groupId ? groupMap.get(tab.groupId) : undefined;
           if (group?.collapsed && tab.id !== activeTabId && tab.id !== splitTabId) {
@@ -653,6 +667,15 @@ export const VerticalTabRail = memo(function VerticalTabRail({
             <div
               key={tab.id}
               onContextMenu={(e) => handleOpenContextMenu(e, tab.id)}
+              onMouseDown={(e) => {
+                if (e.button === 1) e.preventDefault();
+              }}
+              onAuxClick={(e) => {
+                if (e.button === 1) {
+                  e.preventDefault();
+                  onCloseTab(tab.id);
+                }
+              }}
               className={`group flex items-center gap-1 px-2 py-1.5 rounded-lg border transition-colors ${
                 isActive
                   ? 'bg-[#161B26] border-white/15 text-white'
@@ -664,6 +687,8 @@ export const VerticalTabRail = memo(function VerticalTabRail({
             >
               <button
                 type="button"
+                role="tab"
+                aria-selected={isActive}
                 onClick={() => onSelectTab(tab.id)}
                 className="flex items-center gap-2 min-w-0 flex-1 text-left text-xs"
               >

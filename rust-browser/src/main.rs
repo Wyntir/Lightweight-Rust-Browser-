@@ -35,7 +35,7 @@ use wry::{Theme as WebViewTheme, WebViewBuilderExtWindows};
 use wry::{
     dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
     http::{
-        header::{ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_TYPE},
+        header::{ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL, CONTENT_TYPE},
         Request, Response, StatusCode,
     },
     Rect, WebContext, WebView, WebViewBuilder,
@@ -837,10 +837,13 @@ fn main() {
     if config.hardware_acceleration {
         std::env::set_var(
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--enable-smooth-scrolling --enable-gpu-rasterization --enable-zero-copy",
+            "--enable-smooth-scrolling --enable-gpu-rasterization --enable-zero-copy --enable-features=BackForwardCache,VaapiVideoDecoder --disk-cache-size=268435456",
         );
     } else {
-        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-gpu");
+        std::env::set_var(
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            "--disable-gpu --enable-features=BackForwardCache --disk-cache-size=268435456",
+        );
     }
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
@@ -879,10 +882,17 @@ fn main() {
     let chrome_builder = WebViewBuilder::new()
         .with_background_color(OBSIDIAN_BG)
         .with_custom_protocol("ferrox".into(), move |_webview_id, request| {
-            let (bytes, mime) = ui_assets::resolve_ui_asset(request.uri().path());
+            let req_path = request.uri().path();
+            let (bytes, mime) = ui_assets::resolve_ui_asset(req_path);
+            let cache_header = if req_path.starts_with("/assets/") {
+                "public, max-age=31536000, immutable"
+            } else {
+                "no-cache"
+            };
             Response::builder()
                 .status(StatusCode::OK)
                 .header(CONTENT_TYPE, mime)
+                .header(CACHE_CONTROL, cache_header)
                 .header(ACCESS_CONTROL_ALLOW_ORIGIN, "*")
                 .body(Cow::Borrowed(bytes))
                 .unwrap_or_else(|_| {
@@ -942,7 +952,7 @@ fn main() {
     let limiter_bg = Arc::clone(&initial_state.limiter);
     let tick_proxy = proxy.clone();
     std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(Duration::from_secs(3));
         if let Ok(mut guard) = limiter_bg.lock() {
             guard.sample_process_metrics();
         }

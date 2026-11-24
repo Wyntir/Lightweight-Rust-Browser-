@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   BookOpen,
@@ -62,7 +62,7 @@ interface WebViewportProps {
   onClearTranslation: () => void;
 }
 
-export function WebViewport({
+export const WebViewport = memo(function WebViewport({
   url,
   hibernated,
   loading,
@@ -422,4 +422,4 @@ export function WebViewport({
       </div>
     </div>
   );
-}
+});

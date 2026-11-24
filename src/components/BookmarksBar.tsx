@@ -1,3 +1,4 @@
+import { memo, useMemo } from 'react';
 import { Globe, Terminal, X } from 'lucide-react';
 import { BookmarkItem } from '../lib/browserEngine';
 
@@ -8,13 +9,16 @@ interface BookmarksBarProps {
   onOpenManager: () => void;
 }
 
-export function BookmarksBar({
+export const BookmarksBar = memo(function BookmarksBar({
   bookmarks,
   onNavigate,
   onUnpinFromBar,
   onOpenManager,
 }: BookmarksBarProps) {
-  const barBookmarks = bookmarks.filter((b) => b.pinnedToBar !== false);
+  const barBookmarks = useMemo(
+    () => bookmarks.filter((b) => b.pinnedToBar !== false),
+    [bookmarks]
+  );
 
   return (
     <div
@@ -72,4 +76,4 @@ export function BookmarksBar({
       </button>
     </div>
   );
-}
+});

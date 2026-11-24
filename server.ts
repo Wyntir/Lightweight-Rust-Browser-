@@ -2,9 +2,58 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import net from 'net';
+import zlib from 'zlib';
 import JSZip from 'jszip';
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
+
+interface BrowseCacheEntry {
+  expiresAt: number;
+  payload: Record<string, unknown>;
+}
+
+const BROWSE_CACHE_TTL_MS = 90_000;
+const BROWSE_CACHE_MAX = 48;
+const browseResponseCache = new Map<string, BrowseCacheEntry>();
+
+function getCachedBrowse(key: string): Record<string, unknown> | null {
+  const entry = browseResponseCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    browseResponseCache.delete(key);
+    return null;
+  }
+  // Refresh LRU order
+  browseResponseCache.delete(key);
+  browseResponseCache.set(key, entry);
+  return entry.payload;
+}
+
+function setCachedBrowse(key: string, payload: Record<string, unknown>) {
+  if (browseResponseCache.size >= BROWSE_CACHE_MAX) {
+    const oldest = browseResponseCache.keys().next().value;
+    if (oldest) browseResponseCache.delete(oldest);
+  }
+  browseResponseCache.set(key, { expiresAt: Date.now() + BROWSE_CACHE_TTL_MS, payload });
+}
+
+function sendJsonCompressed(req: express.Request, res: express.Response, data: unknown) {
+  const jsonStr = JSON.stringify(data);
+  const acceptEncoding = String(req.headers['accept-encoding'] || '');
+  if (jsonStr.length > 2048 && acceptEncoding.includes('gzip')) {
+    zlib.gzip(Buffer.from(jsonStr, 'utf-8'), (err, compressed) => {
+      if (err) {
+        res.type('application/json').send(jsonStr);
+        return;
+      }
+      res.setHeader('Content-Encoding', 'gzip');
+      res.setHeader('Vary', 'Accept-Encoding');
+      res.type('application/json').send(compressed);
+    });
+    return;
+  }
+  res.type('application/json').send(jsonStr);
+}
 
 const PORT = Number(process.env.PORT || 3000);
 const RUST_CRATE_DIR = path.resolve(process.cwd(), 'rust-browser');
@@ -98,13 +147,21 @@ function isPrivateOrBlockedHost(hostname: string): boolean {
   return false;
 }
 
-function matchesTrackerDomain(urlStr: string, customRules: string[]): string | null {
+function buildCombinedRules(customRules: string[]): string[] {
+  const seen = new Set<string>(DEFAULT_TRACKER_DOMAINS);
+  for (const r of customRules) {
+    const clean = r.trim().toLowerCase();
+    if (clean) seen.add(clean);
+  }
+  return Array.from(seen);
+}
+
+function matchesTrackerDomain(urlStr: string, combinedRules: string[]): string | null {
   try {
     const parsed = new URL(urlStr);
     const host = parsed.hostname.toLowerCase();
-    for (const rule of [...DEFAULT_TRACKER_DOMAINS, ...customRules]) {
-      const clean = rule.trim().toLowerCase();
-      if (!clean) continue;
+    for (let i = 0; i < combinedRules.length; i++) {
+      const clean = combinedRules[i];
       if (host === clean || host.endsWith(`.${clean}`)) {
         return clean;
       }
@@ -172,6 +229,7 @@ function sanitizeAndRewriteHtml(
   readerParagraphs: string[];
 } {
   const blockedSet = new Set<string>();
+  const combinedRules = shieldEnabled ? buildCombinedRules(customRules) : [];
 
   const titleMatch = rawHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   const title = titleMatch ? decodeHtmlEntities(titleMatch[1].replace(/\s+/g, ' ').trim()) : baseUrl;
@@ -183,7 +241,7 @@ function sanitizeAndRewriteHtml(
         const srcMatch = match.match(/\bsrc=["']([^"']+)["']/i);
         if (srcMatch) {
           const abs = resolveAbsoluteUrl(srcMatch[1], baseUrl);
-          const hit = matchesTrackerDomain(abs, customRules);
+          const hit = matchesTrackerDomain(abs, combinedRules);
           if (hit) blockedSet.add(hit);
         }
       }
@@ -217,7 +275,7 @@ function sanitizeAndRewriteHtml(
       }
 
       if (shieldEnabled && attr.toLowerCase() === 'src') {
-        const hit = matchesTrackerDomain(abs, customRules);
+        const hit = matchesTrackerDomain(abs, combinedRules);
         if (hit) {
           blockedSet.add(hit);
           return `${attr}="about:blank" data-ferrox-blocked="${escapeHtml(hit)}"`;
@@ -435,48 +493,58 @@ async function startServer() {
     res.json({ ok: true, engine: 'ferrox-proxy', version: '0.2.0' });
   });
 
-  app.get('/api/rust-files', (_req, res) => {
-    const files = collectRustFiles(RUST_CRATE_DIR, RUST_CRATE_DIR).map((f) => {
-      if (f.isBinary) {
+  let cachedRustFilesJson: { crateName: string; files: Array<{ path: string; language: string; sizeBytes: number; content: string }> } | null = null;
+  let cachedRustZipBuffer: Buffer | null = null;
+
+  app.get('/api/rust-files', (req, res) => {
+    if (!cachedRustFilesJson) {
+      const files = collectRustFiles(RUST_CRATE_DIR, RUST_CRATE_DIR).map((f) => {
+        if (f.isBinary) {
+          return {
+            path: f.path,
+            language: f.language,
+            sizeBytes: f.sizeBytes,
+            content: `[Binary asset: ${f.path} (${(f.sizeBytes / 1024).toFixed(1)} KB) — embedded via include_bytes! in src/ui_assets.rs and packaged intact inside ferrox-browser-rust.zip.]`,
+          };
+        }
+        if (f.path.startsWith('src/ui/') && f.sizeBytes > 32_000) {
+          return {
+            path: f.path,
+            language: f.language,
+            sizeBytes: f.sizeBytes,
+            content: `/* FerroX Compiled Chrome UI Asset: ${f.path} (${(f.sizeBytes / 1024).toFixed(1)} KB) */\n/* Built from src/ (React 19 + Tailwind CSS + Lucide) via "npm run build:rust-ui". */\n/* Embedded via include_bytes! in src/ui_assets.rs and served over wry's custom protocol (ferrox://). */\n`,
+          };
+        }
         return {
           path: f.path,
           language: f.language,
           sizeBytes: f.sizeBytes,
-          content: `[Binary asset: ${f.path} (${(f.sizeBytes / 1024).toFixed(1)} KB) — embedded via include_bytes! in src/ui_assets.rs and packaged intact inside ferrox-browser-rust.zip.]`,
+          content: f.buffer.toString('utf-8'),
         };
-      }
-      if (f.path.startsWith('src/ui/') && f.sizeBytes > 32_000) {
-        return {
-          path: f.path,
-          language: f.language,
-          sizeBytes: f.sizeBytes,
-          content: `/* FerroX Compiled Chrome UI Asset: ${f.path} (${(f.sizeBytes / 1024).toFixed(1)} KB) */\n/* Built from src/ (React 19 + Tailwind CSS + Lucide) via "npm run build:rust-ui". */\n/* Embedded via include_bytes! in src/ui_assets.rs and served over wry's custom protocol (ferrox://). */\n`,
-        };
-      }
-      return {
-        path: f.path,
-        language: f.language,
-        sizeBytes: f.sizeBytes,
-        content: f.buffer.toString('utf-8'),
-      };
-    });
-    res.json({ crateName: 'ferrox-browser', files });
+      });
+      cachedRustFilesJson = { crateName: 'ferrox-browser', files };
+    }
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    sendJsonCompressed(req, res, cachedRustFilesJson);
   });
 
   app.get('/api/rust-crate.zip', async (_req, res) => {
     try {
-      const files = collectRustFiles(RUST_CRATE_DIR, RUST_CRATE_DIR);
-      const zip = new JSZip();
-      const rootFolder = zip.folder('ferrox-browser');
-      if (rootFolder) {
-        for (const file of files) {
-          rootFolder.file(file.path, file.buffer);
+      if (!cachedRustZipBuffer) {
+        const files = collectRustFiles(RUST_CRATE_DIR, RUST_CRATE_DIR);
+        const zip = new JSZip();
+        const rootFolder = zip.folder('ferrox-browser');
+        if (rootFolder) {
+          for (const file of files) {
+            rootFolder.file(file.path, file.buffer);
+          }
         }
+        cachedRustZipBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
       }
-      const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
       res.setHeader('Content-Type', 'application/zip');
       res.setHeader('Content-Disposition', 'attachment; filename="ferrox-browser-rust.zip"');
-      res.send(buffer);
+      res.setHeader('Cache-Control', 'public, max-age=60');
+      res.send(cachedRustZipBuffer);
     } catch {
       res.status(500).json({ error: 'Failed to bundle Rust crate archive.' });
     }
@@ -611,7 +679,8 @@ async function startServer() {
       stripTrackingParams(parsed);
     }
 
-    const trackerHit = shieldEnabled ? matchesTrackerDomain(parsed.toString(), customRules) : null;
+    const combinedRules = shieldEnabled ? buildCombinedRules(customRules) : [];
+    const trackerHit = shieldEnabled ? matchesTrackerDomain(parsed.toString(), combinedRules) : null;
     if (trackerHit) {
       return res.status(200).json({
         blockedByShield: true,
@@ -631,6 +700,15 @@ async function startServer() {
 
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    const forceRefresh = req.query.refresh === '1';
+    const cacheKey = `${parsed.toString()}|s:${shieldEnabled ? 1 : 0}|f:${fingerprintProtection ? 1 : 0}|r:${customRulesRaw}`;
+    if (!forceRefresh && limitKbps <= 0) {
+      const cached = getCachedBrowse(cacheKey);
+      if (cached) {
+        return sendJsonCompressed(req, res, { ...cached, elapsedMs: 1, cached: true });
+      }
+    }
 
     const startTime = Date.now();
     const controller = new AbortController();
@@ -711,7 +789,7 @@ async function startServer() {
         fingerprintProtection
       );
 
-      return res.json({
+      const payload = {
         blockedByShield: false,
         finalUrl,
         title,
@@ -723,7 +801,11 @@ async function startServer() {
         blockedTrackers,
         readerParagraphs,
         sanitizedHtml,
-      });
+      };
+      if (upstream.status >= 200 && upstream.status < 400 && limitKbps <= 0) {
+        setCachedBrowse(cacheKey, payload);
+      }
+      return sendJsonCompressed(req, res, payload);
     } catch (err) {
       clearTimeout(timer);
       const message = err instanceof Error ? err.message : 'Network error while fetching page.';

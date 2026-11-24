@@ -77,10 +77,8 @@ pub struct ResourceLimiter {
 
 impl ResourceLimiter {
     pub fn new(config: LimiterConfig) -> Self {
-        let mut system = System::new();
+        let system = System::new();
         let pid = Pid::from_u32(std::process::id());
-        let kind = ProcessRefreshKind::new().with_memory().with_cpu();
-        system.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
         Self {
             config,
             snapshot: TelemetrySnapshot::default(),
