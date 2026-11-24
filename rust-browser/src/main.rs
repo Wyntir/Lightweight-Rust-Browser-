@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "windows")]
@@ -249,6 +249,11 @@ enum UserEvent {
     },
     ProfilesDetected(String),
     ProfileImported(String),
+    MemoryTrimmed {
+        before_mb: u64,
+        after_mb: u64,
+        processes_trimmed: usize,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -284,6 +289,10 @@ struct IpcMessage {
     ram_enabled: Option<bool>,
     #[serde(rename = "ramLimitMb")]
     ram_limit_mb: Option<u64>,
+    #[serde(rename = "autoHibernateEnabled")]
+    auto_hibernate_enabled: Option<bool>,
+    #[serde(rename = "autoHibernateMinutes")]
+    auto_hibernate_minutes: Option<u64>,
     #[serde(rename = "cpuEnabled")]
     cpu_enabled: Option<bool>,
     #[serde(rename = "cpuLimitPercent")]
@@ -348,7 +357,14 @@ struct UiSyncPayload {
     ram_mb: u64,
     ram_limit_mb: u64,
     ram_enabled: bool,
+    auto_hibernate_enabled: bool,
+    auto_hibernate_minutes: u64,
+    cpu_enabled: bool,
+    cpu_limit_percent: u32,
+    net_enabled: bool,
+    net_limit_kbps: u64,
     cpu_percent: f32,
+    process_count: usize,
     shield_enabled: bool,
     blocked_count: usize,
     accent_hex: &'static str,
@@ -395,8 +411,10 @@ struct AppState {
     initial_auto_sync_done: bool,
     tab_last_bounds: HashMap<String, (i32, i32, i32, i32)>,
     tab_last_visible: HashMap<String, bool>,
+    tab_last_active: HashMap<String, Instant>,
     tab_zooms: HashMap<String, f64>,
-    last_telemetry_sent: Option<(u64, i32)>,
+    last_telemetry_sent: Option<(u64, i32, usize)>,
+    last_trim_at: Option<Instant>,
 }
 
 fn workspace_slug(ws: WorkspaceId) -> &'static str {
@@ -722,19 +740,24 @@ fn apply_tab_webviews_layout(
 }
 
 fn sync_telemetry_only(state: &mut AppState, chrome: &WebView) {
-    let (ram_mb, cpu_percent) = match state.limiter.lock() {
-        Ok(guard) => (guard.snapshot.total_ram_mb, guard.snapshot.total_cpu_percent),
-        Err(_) => (0, 0.0),
+    let (ram_mb, cpu_percent, process_count) = match state.limiter.lock() {
+        Ok(guard) => (
+            guard.snapshot.total_ram_mb,
+            guard.snapshot.total_cpu_percent,
+            guard.snapshot.process_count,
+        ),
+        Err(_) => (0, 0.0, 1),
     };
     let cpu_tenths = (cpu_percent * 10.0).round() as i32;
-    if state.last_telemetry_sent == Some((ram_mb, cpu_tenths)) {
+    if state.last_telemetry_sent == Some((ram_mb, cpu_tenths, process_count)) {
         return;
     }
-    state.last_telemetry_sent = Some((ram_mb, cpu_tenths));
+    state.last_telemetry_sent = Some((ram_mb, cpu_tenths, process_count));
     let _ = chrome.evaluate_script(&format!(
-        "if (window.__ferroxTelemetry) window.__ferroxTelemetry({{ ramMb: {}, cpuPercent: {:.1} }});",
+        "if (window.__ferroxTelemetry) window.__ferroxTelemetry({{ ramMb: {}, cpuPercent: {:.1}, processCount: {} }});",
         ram_mb,
-        cpu_tenths as f32 / 10.0
+        cpu_tenths as f32 / 10.0,
+        process_count
     ));
 }
 
@@ -744,14 +767,33 @@ fn sync_views(
     chrome: &WebView,
     tab_webviews: &HashMap<String, WebView>,
 ) {
-    let (ram_mb, ram_limit_mb, ram_enabled, cpu_percent) = match state.limiter.lock() {
+    let (
+        ram_mb,
+        ram_limit_mb,
+        ram_enabled,
+        auto_hibernate_enabled,
+        auto_hibernate_minutes,
+        cpu_enabled,
+        cpu_limit_percent,
+        net_enabled,
+        net_limit_kbps,
+        cpu_percent,
+        process_count,
+    ) = match state.limiter.lock() {
         Ok(guard) => (
             guard.snapshot.total_ram_mb,
             guard.config.ram_limit_mb,
             guard.config.ram_enabled,
+            guard.config.auto_hibernate_enabled,
+            guard.config.auto_hibernate_minutes,
+            guard.config.cpu_enabled,
+            guard.config.cpu_limit_percent,
+            guard.config.net_enabled,
+            guard.config.net_limit_kbps,
             guard.snapshot.total_cpu_percent,
+            guard.snapshot.process_count,
         ),
-        Err(_) => (0, 1024, true, 0.0),
+        Err(_) => (0, 512, true, true, 5, false, 60, false, 1024, 0.0, 1),
     };
 
     let active_url = state
@@ -784,7 +826,14 @@ fn sync_views(
         ram_mb,
         ram_limit_mb,
         ram_enabled,
+        auto_hibernate_enabled,
+        auto_hibernate_minutes,
+        cpu_enabled,
+        cpu_limit_percent,
+        net_enabled,
+        net_limit_kbps,
         cpu_percent,
+        process_count,
         shield_enabled: state.shield.enabled,
         blocked_count: state.shield.blocked_count(),
         accent_hex: state.core.config.accent.hex(),
@@ -830,21 +879,70 @@ fn toggle_window_fullscreen(state: &mut AppState, window: &Window, chrome: &WebV
     ));
 }
 
+fn build_webview2_args(config: &BrowserConfig) -> String {
+    let mut args = vec![
+        "--process-per-site".to_string(),
+        "--disable-background-networking".to_string(),
+        "--disable-component-update".to_string(),
+        "--disable-domain-reliability".to_string(),
+        "--no-pings".to_string(),
+        "--enable-features=BackForwardCache,QuickIntensiveWakeUpThrottlingAfterLoading".to_string(),
+    ];
+
+    if config.ram_enabled {
+        let v8_mb = (config.ram_limit_mb / 3).clamp(96, 256);
+        let gpu_mb = (config.ram_limit_mb / 6).clamp(32, 96);
+        let renderer_limit = if config.ram_limit_mb <= 512 { 3 } else { 4 };
+        args.push(format!(
+            "--js-flags=\"--max-old-space-size={} --optimize-for-size\"",
+            v8_mb
+        ));
+        args.push(format!("--force-gpu-mem-available-mb={}", gpu_mb));
+        args.push(format!("--renderer-process-limit={}", renderer_limit));
+        args.push("--gpu-program-cache-size-kb=8192".to_string());
+        args.push("--disk-cache-size=134217728".to_string());
+        args.push("--media-cache-size=33554432".to_string());
+    } else {
+        args.push("--gpu-program-cache-size-kb=16384".to_string());
+        args.push("--disk-cache-size=201326592".to_string());
+        args.push("--media-cache-size=67108864".to_string());
+    }
+
+    if config.hardware_acceleration {
+        args.push("--enable-smooth-scrolling".to_string());
+    } else {
+        args.push("--disable-gpu".to_string());
+    }
+
+    args.join(" ")
+}
+
+fn notify_tab_hibernated(chrome: &WebView, tab_id: &str) {
+    if let Ok(json_id) = serde_json::to_string(tab_id) {
+        let _ = chrome.evaluate_script(&format!(
+            "if (window.__ferroxTabHibernated) window.__ferroxTabHibernated({});",
+            json_id
+        ));
+    }
+}
+
 fn main() {
     env_logger::init();
 
     let config = BrowserConfig::load_or_default();
-    if config.hardware_acceleration {
-        std::env::set_var(
-            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--enable-smooth-scrolling --enable-gpu-rasterization --enable-zero-copy --enable-features=BackForwardCache,VaapiVideoDecoder --disk-cache-size=268435456",
-        );
-    } else {
-        std::env::set_var(
-            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--disable-gpu --enable-features=BackForwardCache --disk-cache-size=268435456",
-        );
-    }
+    let webview2_args = build_webview2_args(&config);
+    std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", webview2_args);
+
+    let initial_limiter_cfg = LimiterConfig {
+        ram_enabled: config.ram_enabled,
+        ram_limit_mb: config.ram_limit_mb,
+        auto_hibernate_enabled: config.auto_hibernate_enabled,
+        auto_hibernate_minutes: config.auto_hibernate_minutes,
+        cpu_enabled: config.cpu_enabled,
+        cpu_limit_percent: config.cpu_limit_percent,
+        net_enabled: config.net_enabled,
+        net_limit_kbps: config.net_limit_kbps,
+    };
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -863,7 +961,8 @@ fn main() {
         .build(&event_loop)
         .expect("Failed to create FerroX window");
 
-    // Shared persistent WebContext for HTTP disk cache, cookies, sessions, and IndexedDB across all tabs
+    // SINGLE shared persistent WebContext for chrome UI + all content tabs:
+    // eliminates duplicate WebView2 browser + GPU processes (~200-300 MB saved immediately).
     let profile_dir = dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("ferrox-browser")
@@ -879,7 +978,7 @@ fn main() {
     #[cfg(not(target_os = "windows"))]
     let chrome_entry_url = "ferrox://localhost/index.html";
 
-    let chrome_builder = WebViewBuilder::new()
+    let chrome_builder = WebViewBuilder::with_web_context(&mut shared_web_context)
         .with_background_color(OBSIDIAN_BG)
         .with_custom_protocol("ferrox".into(), move |_webview_id, request| {
             let req_path = request.uri().path();
@@ -929,7 +1028,7 @@ fn main() {
 
     let initial_state = AppState {
         core: BrowserCore::new(config),
-        limiter: Arc::new(Mutex::new(ResourceLimiter::new(LimiterConfig::default()))),
+        limiter: Arc::new(Mutex::new(ResourceLimiter::new(initial_limiter_cfg))),
         shield,
         security: SecurityEngine::new(),
         privacy,
@@ -943,8 +1042,10 @@ fn main() {
         initial_auto_sync_done: false,
         tab_last_bounds: HashMap::new(),
         tab_last_visible: HashMap::new(),
+        tab_last_active: HashMap::new(),
         tab_zooms: HashMap::new(),
         last_telemetry_sent: None,
+        last_trim_at: None,
     };
 
     let mut tab_webviews: HashMap<String, WebView> = HashMap::new();
@@ -1142,17 +1243,113 @@ fn main() {
                     json
                 ));
             }
+            Event::UserEvent(UserEvent::MemoryTrimmed {
+                before_mb,
+                after_mb,
+                processes_trimmed,
+            }) => {
+                let _ = chrome_webview.evaluate_script(&format!(
+                    "if (window.__ferroxMemoryTrimmed) window.__ferroxMemoryTrimmed({{ beforeMb: {}, afterMb: {}, processesTrimmed: {} }});",
+                    before_mb, after_mb, processes_trimmed
+                ));
+                state.last_telemetry_sent = None;
+                sync_telemetry_only(&mut state, &chrome_webview);
+            }
             Event::UserEvent(UserEvent::TelemetryTick) => {
-                let should_hibernate = state
+                let (
+                    ram_enabled,
+                    ram_limit_mb,
+                    total_ram_mb,
+                    auto_hib_enabled,
+                    auto_hib_minutes,
+                    cpu_enabled,
+                ) = state
                     .limiter
                     .lock()
-                    .map(|g| g.config.ram_enabled && g.snapshot.total_ram_mb > g.config.ram_limit_mb)
-                    .unwrap_or(false);
-                if should_hibernate && state.core.tabs.hibernate_oldest_background_tab() > 0 {
-                    sync_views(&mut state, &window, &chrome_webview, &tab_webviews);
-                } else {
-                    sync_telemetry_only(&mut state, &chrome_webview);
+                    .map(|g| {
+                        (
+                            g.config.ram_enabled,
+                            g.config.ram_limit_mb,
+                            g.snapshot.total_ram_mb,
+                            g.config.auto_hibernate_enabled,
+                            g.config.auto_hibernate_minutes,
+                            g.config.cpu_enabled,
+                        )
+                    })
+                    .unwrap_or((false, 512, 0, false, 5, false));
+
+                let mut evicted_any = false;
+                let now = Instant::now();
+
+                // 1. Auto-Hibernate idle background tabs past the user's slider threshold
+                if auto_hib_enabled && auto_hib_minutes > 0 {
+                    let idle_cutoff = Duration::from_secs(auto_hib_minutes * 60);
+                    let active_key = state.active_tab_key.as_deref();
+                    let expired_keys: Vec<String> = tab_webviews
+                        .keys()
+                        .filter(|k| active_key != Some(k.as_str()))
+                        .filter(|k| {
+                            state
+                                .tab_last_active
+                                .get(*k)
+                                .map(|t| now.duration_since(*t) >= idle_cutoff)
+                                .unwrap_or(false)
+                        })
+                        .cloned()
+                        .collect();
+
+                    for key in expired_keys {
+                        tab_webviews.remove(&key);
+                        state.tab_last_bounds.remove(&key);
+                        state.tab_last_visible.remove(&key);
+                        state.tab_last_active.remove(&key);
+                        notify_tab_hibernated(&chrome_webview, &key);
+                        evicted_any = true;
+                    }
                 }
+
+                // 2. Real RAM Limiter enforcement: drop oldest inactive WebView + trim OS working sets
+                if ram_enabled && total_ram_mb > ram_limit_mb {
+                    let active_key = state.active_tab_key.as_deref();
+                    let oldest_victim = tab_webviews
+                        .keys()
+                        .filter(|k| active_key != Some(k.as_str()))
+                        .min_by_key(|k| state.tab_last_active.get(*k).copied().unwrap_or(now))
+                        .cloned();
+
+                    if let Some(victim) = oldest_victim {
+                        tab_webviews.remove(&victim);
+                        state.tab_last_bounds.remove(&victim);
+                        state.tab_last_visible.remove(&victim);
+                        state.tab_last_active.remove(&victim);
+                        notify_tab_hibernated(&chrome_webview, &victim);
+                        evicted_any = true;
+                    }
+
+                    let cooldown_ok = state
+                        .last_trim_at
+                        .map(|t| now.duration_since(t) >= Duration::from_secs(6))
+                        .unwrap_or(true);
+                    if evicted_any || cooldown_ok {
+                        if let Ok(guard) = state.limiter.lock() {
+                            guard.trim_process_tree_working_set();
+                        }
+                        state.last_trim_at = Some(now);
+                    }
+                } else if evicted_any {
+                    if let Ok(guard) = state.limiter.lock() {
+                        guard.trim_process_tree_working_set();
+                    }
+                    state.last_trim_at = Some(now);
+                }
+
+                if cpu_enabled {
+                    if let Ok(guard) = state.limiter.lock() {
+                        guard.apply_cpu_priority();
+                    }
+                }
+
+                sync_telemetry_only(&mut state, &chrome_webview);
             }
             Event::UserEvent(UserEvent::Ipc(raw)) => {
                 let Ok(msg) = serde_json::from_str::<IpcMessage>(&raw) else {
@@ -1263,6 +1460,7 @@ fn main() {
                                     state.active_tab_key = Some(tab_key.clone());
                                     state.content_visible = true;
                                 }
+                                state.tab_last_active.insert(tab_key.clone(), Instant::now());
                                 if let Some(existing_wv) = tab_webviews.get(&tab_key) {
                                     let _ = existing_wv.load_url(&assessment.upgraded_url);
                                 } else {
@@ -1304,6 +1502,7 @@ fn main() {
                             let url = msg.url.unwrap_or_else(|| "ferrox://speed-dial".to_string());
                             let is_private = msg.is_private.unwrap_or(false);
                             state.active_tab_key = Some(tab_key.clone());
+                            state.tab_last_active.insert(tab_key.clone(), Instant::now());
                             if url.starts_with("ferrox://") {
                                 state.content_visible = false;
                             } else {
@@ -1358,11 +1557,15 @@ fn main() {
                             tab_webviews.remove(&tab_key);
                             state.tab_last_bounds.remove(&tab_key);
                             state.tab_last_visible.remove(&tab_key);
+                            state.tab_last_active.remove(&tab_key);
                             if msg.action == "close_tab" {
                                 state.tab_zooms.remove(&tab_key);
                             }
                             if state.active_tab_key.as_deref() == Some(tab_key.as_str()) {
                                 state.content_visible = false;
+                            }
+                            if let Ok(guard) = state.limiter.lock() {
+                                guard.trim_process_tree_working_set();
                             }
                             layout_only = true;
                         }
@@ -1471,28 +1674,93 @@ fn main() {
                         state
                             .tab_last_visible
                             .retain(|k, _| active_key.as_deref() == Some(k.as_str()));
+                        state
+                            .tab_last_active
+                            .retain(|k, _| active_key.as_deref() == Some(k.as_str()));
                         state.core.tabs.hibernate_all_inactive();
+                        if let Ok(guard) = state.limiter.lock() {
+                            guard.trim_process_tree_working_set();
+                        }
+                        state.last_trim_at = Some(Instant::now());
+                    }
+                    "trim_memory" => {
+                        let limiter_ref = Arc::clone(&state.limiter);
+                        let bg_proxy = worker_proxy.clone();
+                        std::thread::spawn(move || {
+                            let (before_mb, processes_trimmed) = match limiter_ref.lock() {
+                                Ok(mut guard) => {
+                                    guard.sample_process_metrics();
+                                    let before = guard.snapshot.total_ram_mb;
+                                    let trimmed = guard.trim_process_tree_working_set();
+                                    (before, trimmed)
+                                }
+                                Err(_) => (0, 0),
+                            };
+                            std::thread::sleep(Duration::from_millis(200));
+                            let after_mb = match limiter_ref.lock() {
+                                Ok(mut guard) => {
+                                    guard.sample_process_metrics();
+                                    guard.snapshot.total_ram_mb
+                                }
+                                Err(_) => before_mb,
+                            };
+                            let _ = bg_proxy.send_event(UserEvent::MemoryTrimmed {
+                                before_mb,
+                                after_mb,
+                                processes_trimmed,
+                            });
+                        });
+                        return;
                     }
                     "set_limiter" => {
+                        let mut should_trim_now = false;
                         if let Ok(mut guard) = state.limiter.lock() {
                             if let Some(enabled) = msg.ram_enabled {
                                 guard.config.ram_enabled = enabled;
+                                state.core.config.ram_enabled = enabled;
                             }
                             if let Some(limit) = msg.ram_limit_mb {
                                 guard.config.ram_limit_mb = limit;
+                                state.core.config.ram_limit_mb = limit;
+                            }
+                            if let Some(enabled) = msg.auto_hibernate_enabled {
+                                guard.config.auto_hibernate_enabled = enabled;
+                                state.core.config.auto_hibernate_enabled = enabled;
+                            }
+                            if let Some(mins) = msg.auto_hibernate_minutes {
+                                let clamped = mins.clamp(1, 60);
+                                guard.config.auto_hibernate_minutes = clamped;
+                                state.core.config.auto_hibernate_minutes = clamped;
                             }
                             if let Some(enabled) = msg.cpu_enabled {
                                 guard.config.cpu_enabled = enabled;
+                                state.core.config.cpu_enabled = enabled;
                             }
                             if let Some(limit) = msg.cpu_limit_percent {
                                 guard.config.cpu_limit_percent = limit;
+                                state.core.config.cpu_limit_percent = limit;
                             }
                             if let Some(enabled) = msg.net_enabled {
                                 guard.config.net_enabled = enabled;
+                                state.core.config.net_enabled = enabled;
                             }
                             if let Some(limit) = msg.net_limit_kbps {
                                 guard.config.net_limit_kbps = limit;
+                                state.core.config.net_limit_kbps = limit;
                             }
+                            guard.apply_cpu_priority();
+                            if guard.config.ram_enabled
+                                && guard.snapshot.total_ram_mb > guard.config.ram_limit_mb
+                            {
+                                should_trim_now = true;
+                            }
+                        }
+                        let _ = state.core.config.save();
+                        if should_trim_now {
+                            if let Ok(guard) = state.limiter.lock() {
+                                guard.trim_process_tree_working_set();
+                            }
+                            state.last_trim_at = Some(Instant::now());
                         }
                     }
                     "toggle_shield" => {

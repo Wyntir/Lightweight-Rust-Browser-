@@ -549,6 +549,28 @@ test('Hardened privacy.rs runtime script enforces GPC, WebGL/Canvas spoofing, We
   assert.equal(gl.getParameter(37445), 'REAL_GPU_37445');
 });
 
+test('Rust native shell shares one WebContext, caps GPU/V8 memory, walks full process tree, trims working sets, and detects Opera GX variants', () => {
+  const mainRs = fs.readFileSync(mainRsPath, 'utf8');
+  assert.ok(
+    mainRs.includes('let chrome_builder = WebViewBuilder::with_web_context(&mut shared_web_context)'),
+    'chrome_webview must share shared_web_context to avoid spawning a second GPU + browser process'
+  );
+  assert.ok(mainRs.includes('--force-gpu-mem-available-mb='));
+  assert.ok(mainRs.includes('--max-old-space-size='));
+  assert.ok(mainRs.includes('--process-per-site'));
+  assert.ok(mainRs.includes('--media-cache-size='));
+  assert.ok(mainRs.includes('__ferroxTabHibernated'));
+  assert.ok(mainRs.includes('__ferroxMemoryTrimmed'));
+  assert.ok(mainRs.includes('"trim_memory"'));
 
+  const limiterRs = fs.readFileSync(limiterRsPath, 'utf8');
+  assert.ok(limiterRs.includes('SetProcessWorkingSetSize'));
+  assert.ok(limiterRs.includes('trim_process_tree_working_set'));
+  assert.ok(limiterRs.includes('tree.contains(&parent)'), 'Must walk full grandchild WebView2 process tree');
 
-
+  const importerRs = fs.readFileSync(importerRsPath, 'utf8');
+  assert.ok(importerRs.includes('push_opera_software_dir_specs'));
+  assert.ok(importerRs.includes('enumerate_opera_profile_dirs'));
+  assert.ok(importerRs.includes('_side_profiles'));
+  assert.ok(importerRs.includes('profile_name'));
+});

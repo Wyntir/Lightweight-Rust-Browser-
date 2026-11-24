@@ -1,9 +1,12 @@
 import { ChangeEvent, useState } from 'react';
 import {
+  Bookmark,
   CheckCircle2,
+  Clock,
   FolderInput,
   FolderOpen,
   Info,
+  KeyRound,
   RefreshCw,
   Sparkles,
   Upload,
@@ -21,9 +24,29 @@ import {
 } from '../lib/profileImporter';
 import { DetectedBrowserProfile, isRustNativeShell } from '../lib/rustBridge';
 import { VaultCredential } from '../lib/vaultCrypto';
+import { HubSection } from './BrowserHubView';
+
+export interface SyncProfileReceiptItem {
+  profileId: string;
+  browserName: string;
+  profileName: string;
+  bookmarksFound: number;
+  bookmarksAdded: number;
+  historyFound: number;
+  historyAdded: number;
+  credentialsFound: number;
+}
 
 export interface SyncSummary {
   message: string;
+  syncedAt: number;
+  totalBookmarksFound: number;
+  newBookmarksAdded: number;
+  alreadySyncedBookmarks: number;
+  totalHistoryFound: number;
+  newHistoryAdded: number;
+  totalCredentialsFound: number;
+  perProfile: SyncProfileReceiptItem[];
   notes: string[];
 }
 
@@ -31,28 +54,46 @@ interface ProfileImporterPanelProps {
   detectedProfiles: DetectedBrowserProfile[];
   autoSyncBrowsers: boolean;
   syncingProfileId: string | null;
+  rescanningProfiles?: boolean;
+  syncedProfileIds?: string[];
   lastSyncSummary: SyncSummary | null;
+  bookmarksCount?: number;
+  historyCount?: number;
   onToggleAutoSync: () => void;
   onRescanProfiles: () => void;
   onSyncProfile: (profileId: string) => void;
+  onOpenHubSection?: (section: HubSection) => void;
   onImportProfileData: (data: {
     bookmarks: BookmarkItem[];
     history: HistoryItem[];
     credentials: VaultCredential[];
-  }) => void;
+  }) => { newBookmarks: number; newHistory: number; newCredentials: number } | void;
 }
 
 const SUPPORTED_FOLDER_FILE_RE =
   /(^|\/)(bookmarks|bookmarks\.html|bookmarks\.json|bookmarks\.plist|bookmarks-[^/]+\.json|logins\.csv|passwords\.csv|opera passwords\.csv|chrome passwords\.csv|microsoft edge passwords\.csv|brave passwords\.csv|vivaldi passwords\.csv|safari passwords\.csv)$/i;
 
+function formatSyncTime(ts: number): string {
+  try {
+    return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+  } catch {
+    return 'just now';
+  }
+}
+
 export function ProfileImporterPanel({
   detectedProfiles,
   autoSyncBrowsers,
   syncingProfileId,
+  rescanningProfiles = false,
+  syncedProfileIds = [],
   lastSyncSummary,
+  bookmarksCount,
+  historyCount,
   onToggleAutoSync,
   onRescanProfiles,
   onSyncProfile,
+  onOpenHubSection,
   onImportProfileData,
 }: ProfileImporterPanelProps) {
   const nativeShell = isRustNativeShell();
@@ -61,10 +102,12 @@ export function ProfileImporterPanel({
   const [includeBookmarks, setIncludeBookmarks] = useState(true);
   const [includeHistory, setIncludeHistory] = useState(true);
   const [includePasswords, setIncludePasswords] = useState(true);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [folderNotes, setFolderNotes] = useState<string[]>([]);
+  const [localSyncReceipt, setLocalSyncReceipt] = useState<SyncSummary | null>(null);
 
   const meta = BROWSER_PROFILE_SOURCES[source];
+  const activeReceipt = localSyncReceipt && (!lastSyncSummary || localSyncReceipt.syncedAt >= lastSyncSummary.syncedAt)
+    ? localSyncReceipt
+    : lastSyncSummary;
 
   const handleFileUpload = async (e: ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -91,8 +134,6 @@ export function ProfileImporterPanel({
       credentials: mergedCredentials,
       detectedFormats: Array.from(formats),
     });
-    setStatusMessage(null);
-    setFolderNotes([]);
     e.target.value = '';
   };
 
@@ -149,40 +190,97 @@ export function ProfileImporterPanel({
       );
     }
 
-    if (mergedBookmarks.length > 0 || mergedHistory.length > 0 || mergedCredentials.length > 0) {
-      onImportProfileData({
-        bookmarks: mergedBookmarks,
-        history: mergedHistory,
-        credentials: mergedCredentials,
-      });
-      setStatusMessage(
-        `Synced ${mergedBookmarks.length} bookmarks, ${mergedHistory.length} history entries, and ${mergedCredentials.length} logins from selected folder.`
-      );
-    } else {
-      setStatusMessage('No plain-text bookmark/CSV files found in that folder.');
-    }
-    setFolderNotes(notes);
+    const res = onImportProfileData({
+      bookmarks: mergedBookmarks,
+      history: mergedHistory,
+      credentials: mergedCredentials,
+    });
+    const newBookmarks = res?.newBookmarks ?? mergedBookmarks.length;
+    const newHistory = res?.newHistory ?? mergedHistory.length;
+    setLocalSyncReceipt({
+      message:
+        mergedBookmarks.length > 0 || mergedHistory.length > 0 || mergedCredentials.length > 0
+          ? `Synced selected profile folder`
+          : 'No plain-text bookmark/CSV files found in that folder.',
+      syncedAt: Date.now(),
+      totalBookmarksFound: mergedBookmarks.length,
+      newBookmarksAdded: newBookmarks,
+      alreadySyncedBookmarks: Math.max(0, mergedBookmarks.length - newBookmarks),
+      totalHistoryFound: mergedHistory.length,
+      newHistoryAdded: newHistory,
+      totalCredentialsFound: mergedCredentials.length,
+      perProfile:
+        mergedBookmarks.length > 0 || mergedHistory.length > 0 || mergedCredentials.length > 0
+          ? [
+              {
+                profileId: 'folder',
+                browserName: 'Selected Profile Folder',
+                profileName: 'Local Files',
+                bookmarksFound: mergedBookmarks.length,
+                bookmarksAdded: newBookmarks,
+                historyFound: mergedHistory.length,
+                historyAdded: newHistory,
+                credentialsFound: mergedCredentials.length,
+              },
+            ]
+          : [],
+      notes,
+    });
     e.target.value = '';
   };
 
-  const handleQuickDemoSync = (targetSource: BrowserSourceId) => {
-    const sample = getSampleProfileData(targetSource);
-    onImportProfileData({
-      bookmarks: sample.bookmarks,
-      history: sample.history,
-      credentials: sample.credentials,
+  const handleQuickDemoSync = (targetSources: BrowserSourceId[]) => {
+    const allBookmarks: BookmarkItem[] = [];
+    const allHistory: HistoryItem[] = [];
+    const allCreds: VaultCredential[] = [];
+    const perProfile: SyncProfileReceiptItem[] = [];
+
+    for (const id of targetSources) {
+      const sample = getSampleProfileData(id);
+      const res = onImportProfileData({
+        bookmarks: sample.bookmarks,
+        history: sample.history,
+        credentials: sample.credentials,
+      });
+      const addedBm = res?.newBookmarks ?? sample.bookmarks.length;
+      const addedHist = res?.newHistory ?? sample.history.length;
+      allBookmarks.push(...sample.bookmarks);
+      allHistory.push(...sample.history);
+      allCreds.push(...sample.credentials);
+      perProfile.push({
+        profileId: id,
+        browserName: BROWSER_PROFILE_SOURCES[id].name,
+        profileName: 'Default',
+        bookmarksFound: sample.bookmarks.length,
+        bookmarksAdded: addedBm,
+        historyFound: sample.history.length,
+        historyAdded: addedHist,
+        credentialsFound: sample.credentials.length,
+      });
+    }
+
+    const totalNewBm = perProfile.reduce((s, p) => s + p.bookmarksAdded, 0);
+    const totalNewHist = perProfile.reduce((s, p) => s + p.historyAdded, 0);
+    setLocalSyncReceipt({
+      message:
+        targetSources.length === 1
+          ? `Synced ${BROWSER_PROFILE_SOURCES[targetSources[0]].name}`
+          : `Synced all ${targetSources.length} browsers`,
+      syncedAt: Date.now(),
+      totalBookmarksFound: allBookmarks.length,
+      newBookmarksAdded: totalNewBm,
+      alreadySyncedBookmarks: Math.max(0, allBookmarks.length - totalNewBm),
+      totalHistoryFound: allHistory.length,
+      newHistoryAdded: totalNewHist,
+      totalCredentialsFound: allCreds.length,
+      perProfile,
+      notes: [],
     });
-    setStatusMessage(
-      `Synced ${sample.bookmarks.length} bookmarks, ${sample.history.length} history entries, and ${sample.credentials.length} logins from ${BROWSER_PROFILE_SOURCES[targetSource].name}.`
-    );
-    setFolderNotes([]);
     setPreview(null);
   };
 
   const handleLoadSample = () => {
     setPreview(getSampleProfileData(source));
-    setStatusMessage(null);
-    setFolderNotes([]);
   };
 
   const handleConfirmImport = () => {
@@ -190,11 +288,32 @@ export function ProfileImporterPanel({
     const bookmarks = includeBookmarks ? preview.bookmarks : [];
     const history = includeHistory ? preview.history : [];
     const credentials = includePasswords ? preview.credentials : [];
-    onImportProfileData({ bookmarks, history, credentials });
-    setStatusMessage(
-      `Imported ${bookmarks.length} bookmarks, ${history.length} history entries, and ${credentials.length} logins from ${meta.name}.`
-    );
-    setFolderNotes([]);
+    const res = onImportProfileData({ bookmarks, history, credentials });
+    const addedBm = res?.newBookmarks ?? bookmarks.length;
+    const addedHist = res?.newHistory ?? history.length;
+    setLocalSyncReceipt({
+      message: `Imported data from ${meta.name}`,
+      syncedAt: Date.now(),
+      totalBookmarksFound: bookmarks.length,
+      newBookmarksAdded: addedBm,
+      alreadySyncedBookmarks: Math.max(0, bookmarks.length - addedBm),
+      totalHistoryFound: history.length,
+      newHistoryAdded: addedHist,
+      totalCredentialsFound: credentials.length,
+      perProfile: [
+        {
+          profileId: source,
+          browserName: meta.name,
+          profileName: 'Manual Import',
+          bookmarksFound: bookmarks.length,
+          bookmarksAdded: addedBm,
+          historyFound: history.length,
+          historyAdded: addedHist,
+          credentialsFound: credentials.length,
+        },
+      ],
+      notes: [],
+    });
     setPreview(null);
   };
 
@@ -241,26 +360,137 @@ export function ProfileImporterPanel({
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold text-white disabled:opacity-45 transition-opacity"
                 style={{ backgroundColor: 'var(--fx-accent)' }}
               >
-                <Zap className="w-3.5 h-3.5" aria-hidden="true" />
+                <Zap className={`w-3.5 h-3.5 ${isSyncingAll ? 'animate-pulse' : ''}`} aria-hidden="true" />
                 {isSyncingAll
-                  ? 'Syncing All Browsers...'
+                  ? `Syncing ${detectedProfiles.length} Profile${detectedProfiles.length === 1 ? '' : 's'}...`
                   : `Sync All Detected (${detectedProfiles.length})`}
               </button>
               <button
                 type="button"
                 onClick={onRescanProfiles}
-                disabled={syncingProfileId !== null}
+                disabled={syncingProfileId !== null || rescanningProfiles}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-black/25 hover:bg-white/10 border border-white/10 text-xs font-medium text-slate-200 disabled:opacity-45"
               >
-                <RefreshCw className="w-3.5 h-3.5" aria-hidden="true" />
-                Rescan PC
+                <RefreshCw className={`w-3.5 h-3.5 ${rescanningProfiles ? 'animate-spin' : ''}`} aria-hidden="true" />
+                {rescanningProfiles ? 'Scanning PC...' : 'Rescan PC'}
               </button>
+              {activeReceipt && (
+                <span className="text-[11px] font-mono-tabular text-emerald-400">
+                  Last synced {formatSyncTime(activeReceipt.syncedAt)}
+                </span>
+              )}
             </div>
+
+            {/* Literal, Unmistakable Sync Receipt right below the Sync button */}
+            {activeReceipt && (
+              <div
+                className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/25 space-y-2.5"
+                role="status"
+                aria-live="polite"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs font-semibold text-emerald-300">
+                    <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" aria-hidden="true" />
+                    <span>{activeReceipt.message}</span>
+                  </div>
+                  <span className="font-mono-tabular text-[11px] text-emerald-300/80">
+                    {formatSyncTime(activeReceipt.syncedAt)}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 text-[11px]">
+                  <div className="p-2 rounded-lg bg-black/30 border border-white/8">
+                    <div className="text-slate-400">Bookmarks</div>
+                    <div className="font-mono-tabular font-semibold text-white mt-0.5">
+                      +{activeReceipt.newBookmarksAdded} new
+                    </div>
+                    <div className="font-mono-tabular text-[10px] text-slate-400">
+                      {activeReceipt.totalBookmarksFound} found · {activeReceipt.alreadySyncedBookmarks} already in FerroX
+                    </div>
+                  </div>
+                  <div className="p-2 rounded-lg bg-black/30 border border-white/8">
+                    <div className="text-slate-400">History</div>
+                    <div className="font-mono-tabular font-semibold text-white mt-0.5">
+                      +{activeReceipt.newHistoryAdded} new
+                    </div>
+                    <div className="font-mono-tabular text-[10px] text-slate-400">
+                      {activeReceipt.totalHistoryFound} items scanned
+                    </div>
+                  </div>
+                  <div className="p-2 rounded-lg bg-black/30 border border-white/8">
+                    <div className="text-slate-400">Passwords</div>
+                    <div className="font-mono-tabular font-semibold text-white mt-0.5">
+                      {activeReceipt.totalCredentialsFound} imported
+                    </div>
+                    <div className="font-mono-tabular text-[10px] text-slate-400">
+                      {activeReceipt.totalCredentialsFound > 0 ? 'Ready for Vault' : 'Export CSV for logins'}
+                    </div>
+                  </div>
+                </div>
+
+                {activeReceipt.perProfile.length > 0 && (
+                  <div className="space-y-1 pt-1 border-t border-emerald-500/15">
+                    {activeReceipt.perProfile.map((item) => (
+                      <div
+                        key={`${item.profileId}-${item.profileName}`}
+                        className="flex flex-wrap items-center justify-between gap-2 text-[11px]"
+                      >
+                        <span className="text-slate-200 font-medium">
+                          {item.browserName} · <span className="text-slate-400 font-normal">{item.profileName}</span>
+                        </span>
+                        <span className="font-mono-tabular text-emerald-300/90">
+                          {item.bookmarksFound} bm ({item.bookmarksAdded > 0 ? `+${item.bookmarksAdded} new` : 'up to date'}) · {item.historyFound} history ({item.historyAdded > 0 ? `+${item.historyAdded} new` : 'up to date'})
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {onOpenHubSection && (
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => onOpenHubSection('bookmarks')}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/16 text-[11px] font-medium text-white"
+                    >
+                      <Bookmark className="w-3 h-3 text-emerald-400" aria-hidden="true" />
+                      View Bookmarks{typeof bookmarksCount === 'number' ? ` (${bookmarksCount})` : ''}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onOpenHubSection('history')}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/16 text-[11px] font-medium text-white"
+                    >
+                      <Clock className="w-3 h-3 text-sky-400" aria-hidden="true" />
+                      View History{typeof historyCount === 'number' ? ` (${historyCount})` : ''}
+                    </button>
+                    {activeReceipt.totalCredentialsFound > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenHubSection('passwords')}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/16 text-[11px] font-medium text-white"
+                      >
+                        <KeyRound className="w-3 h-3 text-amber-300" aria-hidden="true" />
+                        Open Password Vault
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {activeReceipt.notes.map((note, idx) => (
+                  <div key={idx} className="flex items-start gap-2 text-[11px] text-slate-300">
+                    <Info className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-400" aria-hidden="true" />
+                    <span>{note}</span>
+                  </div>
+                ))}
+              </div>
+            )}
 
             {detectedProfiles.length > 0 ? (
               <div className="space-y-2">
                 {detectedProfiles.map((profile) => {
                   const isBusy = syncingProfileId === profile.id || isSyncingAll;
+                  const wasSynced = syncedProfileIds.includes(profile.id);
                   return (
                     <div
                       key={profile.id}
@@ -273,12 +503,18 @@ export function ProfileImporterPanel({
                           <span className="text-slate-300 font-normal truncate">
                             {profile.profileName}
                           </span>
+                          {wasSynced && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[10px] font-medium">
+                              <CheckCircle2 className="w-3 h-3" aria-hidden="true" />
+                              Synced
+                            </span>
+                          )}
                         </div>
                         <div className="font-mono-tabular text-[11px] text-slate-400 mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5">
                           <span>{profile.estimatedBookmarks} bookmarks</span>
                           <span>{profile.estimatedHistory} history items</span>
                           {profile.hasLoginsFile && (
-                            <span className="text-slate-500">Logins detected</span>
+                            <span className="text-slate-500">Logins file found</span>
                           )}
                         </div>
                         <div className="font-mono-tabular text-[11px] text-slate-500 truncate mt-0.5">
@@ -291,7 +527,7 @@ export function ProfileImporterPanel({
                         disabled={syncingProfileId !== null}
                         className="px-3.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/16 border border-white/12 text-xs font-medium text-white whitespace-nowrap disabled:opacity-45 shrink-0"
                       >
-                        {isBusy ? 'Syncing...' : 'Sync Now'}
+                        {isBusy ? 'Syncing...' : wasSynced ? 'Sync Again' : 'Sync Now'}
                       </button>
                     </div>
                   );
@@ -309,13 +545,22 @@ export function ProfileImporterPanel({
             <div className="p-3 rounded-lg bg-black/25 border border-white/8 text-xs text-slate-300 leading-relaxed">
               In the compiled Windows/macOS/Linux desktop binary, FerroX automatically scans and syncs{' '}
               <code className="font-mono-tabular text-white">Chrome, Edge, Brave, Opera GX, Opera, Vivaldi, Arc, Firefox, LibreWolf, Waterfox, Floorp &amp; Safari</code>{' '}
-              (including multi-profile folders, even while open). In this web preview, pick any browser profile folder or test 1-click sync below:
+              (including Opera GX Default &amp; GX Profiles, even while open). In this web preview, pick any browser profile folder or test 1-click sync below:
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <label
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold text-white cursor-pointer"
+              <button
+                type="button"
+                onClick={() =>
+                  handleQuickDemoSync(['operagx', 'chrome', 'edge', 'brave', 'firefox', 'safari'])
+                }
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold text-white"
                 style={{ backgroundColor: 'var(--fx-accent)' }}
               >
+                <Zap className="w-3.5 h-3.5" aria-hidden="true" />
+                Sync All Detected (6)
+              </button>
+
+              <label className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-white/10 hover:bg-white/16 border border-white/12 text-xs font-medium text-white cursor-pointer">
                 <FolderOpen className="w-3.5 h-3.5" aria-hidden="true" />
                 Select Browser Profile Folder
                 <input
@@ -327,11 +572,11 @@ export function ProfileImporterPanel({
                 />
               </label>
 
-              {(['chrome', 'edge', 'brave', 'operagx', 'firefox', 'safari'] as BrowserSourceId[]).map((id) => (
+              {(['operagx', 'chrome', 'edge', 'brave', 'firefox', 'safari'] as BrowserSourceId[]).map((id) => (
                 <button
                   key={id}
                   type="button"
-                  onClick={() => handleQuickDemoSync(id)}
+                  onClick={() => handleQuickDemoSync([id])}
                   className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-black/25 hover:bg-white/10 border border-white/10 text-xs font-medium text-slate-200"
                 >
                   <Zap className="w-3 h-3" style={{ color: 'var(--fx-accent)' }} aria-hidden="true" />
@@ -339,36 +584,110 @@ export function ProfileImporterPanel({
                 </button>
               ))}
             </div>
-          </div>
-        )}
 
-        {lastSyncSummary && (
-          <div className="space-y-1.5 pt-1">
-            <div className="flex items-center gap-2 text-xs text-emerald-400">
-              <CheckCircle2 className="w-4 h-4 shrink-0" aria-hidden="true" />
-              <span>{lastSyncSummary.message}</span>
-            </div>
-            {lastSyncSummary.notes.map((note, idx) => (
-              <div key={idx} className="flex items-start gap-2 text-[11px] text-slate-400 pl-6">
-                <Info className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-500" aria-hidden="true" />
-                <span>{note}</span>
-              </div>
-            ))}
-          </div>
-        )}
+            {activeReceipt && (
+              <div
+                className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/25 space-y-2.5"
+                role="status"
+                aria-live="polite"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs font-semibold text-emerald-300">
+                    <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" aria-hidden="true" />
+                    <span>{activeReceipt.message}</span>
+                  </div>
+                  <span className="font-mono-tabular text-[11px] text-emerald-300/80">
+                    {formatSyncTime(activeReceipt.syncedAt)}
+                  </span>
+                </div>
 
-        {statusMessage && (
-          <div className="space-y-1.5 pt-1">
-            <div className="flex items-center gap-2 text-xs text-emerald-400">
-              <CheckCircle2 className="w-4 h-4 shrink-0" aria-hidden="true" />
-              <span>{statusMessage}</span>
-            </div>
-            {folderNotes.map((note, idx) => (
-              <div key={idx} className="flex items-start gap-2 text-[11px] text-slate-400 pl-6">
-                <Info className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-500" aria-hidden="true" />
-                <span>{note}</span>
+                <div className="grid grid-cols-3 gap-2 text-[11px]">
+                  <div className="p-2 rounded-lg bg-black/30 border border-white/8">
+                    <div className="text-slate-400">Bookmarks</div>
+                    <div className="font-mono-tabular font-semibold text-white mt-0.5">
+                      +{activeReceipt.newBookmarksAdded} new
+                    </div>
+                    <div className="font-mono-tabular text-[10px] text-slate-400">
+                      {activeReceipt.totalBookmarksFound} found · {activeReceipt.alreadySyncedBookmarks} already in FerroX
+                    </div>
+                  </div>
+                  <div className="p-2 rounded-lg bg-black/30 border border-white/8">
+                    <div className="text-slate-400">History</div>
+                    <div className="font-mono-tabular font-semibold text-white mt-0.5">
+                      +{activeReceipt.newHistoryAdded} new
+                    </div>
+                    <div className="font-mono-tabular text-[10px] text-slate-400">
+                      {activeReceipt.totalHistoryFound} items scanned
+                    </div>
+                  </div>
+                  <div className="p-2 rounded-lg bg-black/30 border border-white/8">
+                    <div className="text-slate-400">Passwords</div>
+                    <div className="font-mono-tabular font-semibold text-white mt-0.5">
+                      {activeReceipt.totalCredentialsFound} imported
+                    </div>
+                    <div className="font-mono-tabular text-[10px] text-slate-400">
+                      {activeReceipt.totalCredentialsFound > 0 ? 'Ready for Vault' : 'Export CSV for logins'}
+                    </div>
+                  </div>
+                </div>
+
+                {activeReceipt.perProfile.length > 0 && (
+                  <div className="space-y-1 pt-1 border-t border-emerald-500/15">
+                    {activeReceipt.perProfile.map((item) => (
+                      <div
+                        key={`${item.profileId}-${item.profileName}`}
+                        className="flex flex-wrap items-center justify-between gap-2 text-[11px]"
+                      >
+                        <span className="text-slate-200 font-medium">
+                          {item.browserName} · <span className="text-slate-400 font-normal">{item.profileName}</span>
+                        </span>
+                        <span className="font-mono-tabular text-emerald-300/90">
+                          {item.bookmarksFound} bm ({item.bookmarksAdded > 0 ? `+${item.bookmarksAdded} new` : 'up to date'}) · {item.historyFound} history ({item.historyAdded > 0 ? `+${item.historyAdded} new` : 'up to date'})
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {onOpenHubSection && (
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => onOpenHubSection('bookmarks')}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/16 text-[11px] font-medium text-white"
+                    >
+                      <Bookmark className="w-3 h-3 text-emerald-400" aria-hidden="true" />
+                      View Bookmarks{typeof bookmarksCount === 'number' ? ` (${bookmarksCount})` : ''}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onOpenHubSection('history')}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/16 text-[11px] font-medium text-white"
+                    >
+                      <Clock className="w-3 h-3 text-sky-400" aria-hidden="true" />
+                      View History{typeof historyCount === 'number' ? ` (${historyCount})` : ''}
+                    </button>
+                    {activeReceipt.totalCredentialsFound > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenHubSection('passwords')}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/16 text-[11px] font-medium text-white"
+                      >
+                        <KeyRound className="w-3 h-3 text-amber-300" aria-hidden="true" />
+                        Open Password Vault
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {activeReceipt.notes.map((note, idx) => (
+                  <div key={idx} className="flex items-start gap-2 text-[11px] text-slate-300">
+                    <Info className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-400" aria-hidden="true" />
+                    <span>{note}</span>
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
           </div>
         )}
       </div>

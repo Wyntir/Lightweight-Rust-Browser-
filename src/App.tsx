@@ -21,6 +21,7 @@ import {
   duplicateTab,
   evaluateResourceBudget,
   evaluateUrlSecurity,
+  findIdleTabsToHibernate,
   getNextTabId,
   getOriginFromUrl,
   hexToRgbaSoft,
@@ -83,6 +84,7 @@ import {
   rustTabReload,
   rustTabZoom,
   rustToggleFullscreen,
+  rustTrimMemory,
   sendToRust,
   syncRustAutoSync,
   syncRustLimiter,
@@ -90,7 +92,7 @@ import {
   syncRustShield,
   syncRustTheme,
 } from './lib/rustBridge';
-import { SyncSummary } from './components/ProfileImporterPanel';
+import { SyncProfileReceiptItem, SyncSummary } from './components/ProfileImporterPanel';
 
 const STORAGE_KEY = 'ferrox_browser_state_v2';
 const VAULT_STORAGE_KEY = 'ferrox_encrypted_vault_v1';
@@ -148,9 +150,10 @@ export default function App() {
   const [searchEngine, setSearchEngine] = useState<SearchEngineId>(
     initialSaved.searchEngine ?? 'duckduckgo'
   );
-  const [limiter, setLimiter] = useState<LimiterConfig>(
-    initialSaved.limiter ?? DEFAULT_LIMITER_CONFIG
-  );
+  const [limiter, setLimiter] = useState<LimiterConfig>(() => ({
+    ...DEFAULT_LIMITER_CONFIG,
+    ...(initialSaved.limiter ?? {}),
+  }));
   const [shieldEnabled, setShieldEnabled] = useState<boolean>(
     initialSaved.shieldEnabled ?? true
   );
@@ -269,11 +272,16 @@ export default function App() {
   );
   const [detectedProfiles, setDetectedProfiles] = useState<DetectedBrowserProfile[]>([]);
   const [syncingProfileId, setSyncingProfileId] = useState<string | null>(null);
+  const [rescanningProfiles, setRescanningProfiles] = useState<boolean>(false);
+  const [syncedProfileIds, setSyncedProfileIds] = useState<string[]>([]);
   const [lastSyncSummary, setLastSyncSummary] = useState<SyncSummary | null>(null);
+  const [lastTrimNotice, setLastTrimNotice] = useState<string | null>(null);
 
-  const [rustTelemetry, setRustTelemetry] = useState<{ ramMb: number; cpuPercent: number } | null>(
-    null
-  );
+  const [rustTelemetry, setRustTelemetry] = useState<{
+    ramMb: number;
+    cpuPercent: number;
+    processCount?: number;
+  } | null>(null);
 
   const tabCounterRef = useRef(restoredSession.nextCounter);
   const autofillCounterRef = useRef(1);
@@ -288,6 +296,10 @@ export default function App() {
   activeTabIdRef.current = activeTabId;
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+  const bookmarksRef = useRef(bookmarks);
+  bookmarksRef.current = bookmarks;
+  const historyRef = useRef(history);
+  historyRef.current = history;
   const pageCacheRef = useRef(pageCache);
   pageCacheRef.current = pageCache;
   const openTabFromNativeRef = useRef<(url: string, background: boolean) => void>(() => {});
@@ -409,20 +421,44 @@ export default function App() {
   // Native Rust desktop shell sync (live sysinfo telemetry + persisted config.json hydration)
   useEffect(() => {
     if (!isRustNativeShell()) return;
-    const updateTelemetry = (ramMbRaw?: number, cpuPercentRaw?: number) => {
+    const updateTelemetry = (ramMbRaw?: number, cpuPercentRaw?: number, processCountRaw?: number) => {
       const nextRam = ramMbRaw ?? 0;
       const nextCpu = Number((cpuPercentRaw ?? 0).toFixed(1));
       setRustTelemetry((prev) =>
-        prev && prev.ramMb === nextRam && prev.cpuPercent === nextCpu
+        prev &&
+        prev.ramMb === nextRam &&
+        prev.cpuPercent === nextCpu &&
+        prev.processCount === (processCountRaw ?? prev.processCount)
           ? prev
-          : { ramMb: nextRam, cpuPercent: nextCpu }
+          : {
+              ramMb: nextRam,
+              cpuPercent: nextCpu,
+              processCount: processCountRaw ?? prev?.processCount,
+            }
       );
     };
     window.__ferroxTelemetry = (telemetry) => {
-      updateTelemetry(telemetry.ramMb, telemetry.cpuPercent);
+      updateTelemetry(telemetry.ramMb, telemetry.cpuPercent, telemetry.processCount);
+    };
+    window.__ferroxTabHibernated = (tabId: string) => {
+      if (!tabId) return;
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === tabId ? { ...t, hibernated: true, estimatedRamMb: 8, estimatedCpuPercent: 0 } : t
+        )
+      );
+    };
+    window.__ferroxMemoryTrimmed = (info) => {
+      if (!info) return;
+      const saved = Math.max(0, info.beforeMb - info.afterMb);
+      setLastTrimNotice(
+        saved > 0
+          ? `Trimmed ${info.processesTrimmed} processes · ${info.beforeMb} MB -> ${info.afterMb} MB (-${saved} MB)`
+          : `Trimmed ${info.processesTrimmed} processes · working set at ${info.afterMb} MB`
+      );
     };
     window.__ferroxSync = (payload: RustSyncPayload) => {
-      updateTelemetry(payload.ramMb, payload.cpuPercent);
+      updateTelemetry(payload.ramMb, payload.cpuPercent, payload.processCount);
       if (!rustInitializedRef.current) {
         rustInitializedRef.current = true;
         if (
@@ -462,6 +498,25 @@ export default function App() {
         if (typeof payload.autoSyncBrowsers === 'boolean') {
           setAutoSyncBrowsers(payload.autoSyncBrowsers);
         }
+        setLimiter((prev) => ({
+          ...prev,
+          ramEnabled: typeof payload.ramEnabled === 'boolean' ? payload.ramEnabled : prev.ramEnabled,
+          ramLimitMb: typeof payload.ramLimitMb === 'number' && payload.ramLimitMb >= 128 ? payload.ramLimitMb : prev.ramLimitMb,
+          autoHibernateEnabled:
+            typeof payload.autoHibernateEnabled === 'boolean'
+              ? payload.autoHibernateEnabled
+              : prev.autoHibernateEnabled,
+          autoHibernateMinutes:
+            typeof payload.autoHibernateMinutes === 'number' && payload.autoHibernateMinutes >= 1
+              ? payload.autoHibernateMinutes
+              : prev.autoHibernateMinutes,
+          cpuEnabled: typeof payload.cpuEnabled === 'boolean' ? payload.cpuEnabled : prev.cpuEnabled,
+          cpuLimitPercent:
+            typeof payload.cpuLimitPercent === 'number' ? payload.cpuLimitPercent : prev.cpuLimitPercent,
+          netEnabled: typeof payload.netEnabled === 'boolean' ? payload.netEnabled : prev.netEnabled,
+          netLimitKbps:
+            typeof payload.netLimitKbps === 'number' ? payload.netLimitKbps : prev.netLimitKbps,
+        }));
         setPrivacyConfig((prev) => ({
           ...prev,
           hardwareAcceleration: payload.hardwareAcceleration ?? prev.hardwareAcceleration,
@@ -570,47 +625,82 @@ export default function App() {
       }
     };
     window.__ferroxProfilesDetected = (profiles: DetectedBrowserProfile[]) => {
+      setRescanningProfiles(false);
       if (Array.isArray(profiles)) {
         setDetectedProfiles(profiles);
       }
     };
     window.__ferroxProfileImported = (results: NativeProfileImportResult[]) => {
       setSyncingProfileId(null);
+      const ts = Date.now();
       if (!Array.isArray(results) || results.length === 0) {
         setLastSyncSummary({
-          message: 'No matching installed browser profile data found to import.',
+          message: 'No installed browser profile data was found to import.',
+          syncedAt: ts,
+          totalBookmarksFound: 0,
+          newBookmarksAdded: 0,
+          alreadySyncedBookmarks: 0,
+          totalHistoryFound: 0,
+          newHistoryAdded: 0,
+          totalCredentialsFound: 0,
+          perProfile: [],
           notes: [],
         });
         return;
       }
 
-      const incomingBookmarks: BookmarkItem[] = [];
-      const incomingHistory: HistoryItem[] = [];
+      const existingBmUrls = new Set(bookmarksRef.current.map((b) => b.url));
+      const existingHistUrls = new Set(historyRef.current.map((h) => h.url));
+
+      const uniqueNewBookmarks: BookmarkItem[] = [];
+      const uniqueNewHistory: HistoryItem[] = [];
       const incomingCredentials: VaultCredential[] = [];
       const notes: string[] = [];
-      const sourceNames = new Set<string>();
-      const ts = Date.now();
+      const perProfile: SyncProfileReceiptItem[] = [];
+      const newlySyncedIds: string[] = [];
+
+      let totalBookmarksFound = 0;
+      let totalHistoryFound = 0;
 
       results.forEach((res, rIdx) => {
-        sourceNames.add(res.browserName);
-        (res.bookmarks ?? []).forEach((bm, bIdx) => {
-          incomingBookmarks.push({
-            id: `sync-bm-${ts}-${rIdx}-${bIdx}`,
-            title: bm.title,
-            url: bm.url,
-            category: bm.category || res.browserName,
-            pinnedToBar: bm.pinnedToBar,
-          });
+        newlySyncedIds.push(res.profileId);
+        let profileBmAdded = 0;
+        let profileHistAdded = 0;
+        const bmList = res.bookmarks ?? [];
+        const histList = res.history ?? [];
+        const credList = res.credentials ?? [];
+
+        totalBookmarksFound += bmList.length;
+        totalHistoryFound += histList.length;
+
+        bmList.forEach((bm, bIdx) => {
+          if (!existingBmUrls.has(bm.url)) {
+            existingBmUrls.add(bm.url);
+            profileBmAdded += 1;
+            uniqueNewBookmarks.push({
+              id: `sync-bm-${ts}-${rIdx}-${bIdx}`,
+              title: bm.title,
+              url: bm.url,
+              category: bm.category || res.browserName,
+              pinnedToBar: bm.pinnedToBar,
+            });
+          }
         });
-        (res.history ?? []).forEach((h, hIdx) => {
-          incomingHistory.push({
-            id: `sync-hist-${ts}-${rIdx}-${hIdx}`,
-            title: h.title,
-            url: h.url,
-            visitedAt: h.visitedAt || ts,
-          });
+
+        histList.forEach((h, hIdx) => {
+          if (!existingHistUrls.has(h.url)) {
+            existingHistUrls.add(h.url);
+            profileHistAdded += 1;
+            uniqueNewHistory.push({
+              id: `sync-hist-${ts}-${rIdx}-${hIdx}`,
+              title: h.title,
+              url: h.url,
+              visitedAt: h.visitedAt || ts,
+            });
+          }
         });
-        (res.credentials ?? []).forEach((c, cIdx) => {
+
+        credList.forEach((c, cIdx) => {
           incomingCredentials.push({
             id: `sync-cred-${ts}-${rIdx}-${cIdx}`,
             site: c.site,
@@ -619,40 +709,49 @@ export default function App() {
             updatedAt: ts,
           });
         });
+
         (res.notes ?? []).forEach((n) => {
           if (n && !notes.includes(n)) notes.push(n);
         });
+
+        perProfile.push({
+          profileId: res.profileId,
+          browserName: res.browserName,
+          profileName: res.profileName || 'Default',
+          bookmarksFound: bmList.length,
+          bookmarksAdded: profileBmAdded,
+          historyFound: histList.length,
+          historyAdded: profileHistAdded,
+          credentialsFound: credList.length,
+        });
       });
 
-      if (incomingBookmarks.length > 0) {
-        setBookmarks((prev) => {
-          const seen = new Set(prev.map((b) => b.url));
-          const uniqueIncoming = incomingBookmarks.filter((b) => {
-            if (seen.has(b.url)) return false;
-            seen.add(b.url);
-            return true;
-          });
-          return [...prev, ...uniqueIncoming];
-        });
+      if (uniqueNewBookmarks.length > 0) {
+        setBookmarks((prev) => [...prev, ...uniqueNewBookmarks]);
       }
-      if (incomingHistory.length > 0) {
-        setHistory((prev) => {
-          const seen = new Set(prev.map((h) => h.url));
-          const uniqueIncoming = incomingHistory.filter((h) => {
-            if (seen.has(h.url)) return false;
-            seen.add(h.url);
-            return true;
-          });
-          return [...uniqueIncoming, ...prev].slice(0, 250);
-        });
+      if (uniqueNewHistory.length > 0) {
+        setHistory((prev) => [...uniqueNewHistory, ...prev].slice(0, 250));
       }
       if (incomingCredentials.length > 0) {
         setPendingImportedCredentials((prev) => [...incomingCredentials, ...prev]);
       }
 
-      const browserList = Array.from(sourceNames).join(', ');
+      setSyncedProfileIds((prev) => Array.from(new Set([...prev, ...newlySyncedIds])));
+
+      const browserNames = Array.from(new Set(results.map((r) => r.browserName))).join(', ');
       setLastSyncSummary({
-        message: `Synced ${incomingBookmarks.length} bookmarks, ${incomingHistory.length} history items, and ${incomingCredentials.length} logins from ${browserList}.`,
+        message:
+          results.length === 1
+            ? `Synced ${browserNames} (${results[0].profileName || 'Default'})`
+            : `Synced ${results.length} browser profiles (${browserNames})`,
+        syncedAt: ts,
+        totalBookmarksFound,
+        newBookmarksAdded: uniqueNewBookmarks.length,
+        alreadySyncedBookmarks: Math.max(0, totalBookmarksFound - uniqueNewBookmarks.length),
+        totalHistoryFound,
+        newHistoryAdded: uniqueNewHistory.length,
+        totalCredentialsFound: incomingCredentials.length,
+        perProfile,
         notes,
       });
     };
@@ -665,6 +764,8 @@ export default function App() {
     return () => {
       delete window.__ferroxSync;
       delete window.__ferroxTelemetry;
+      delete window.__ferroxTabHibernated;
+      delete window.__ferroxMemoryTrimmed;
       delete window.__ferroxContentUpdate;
       delete window.__ferroxOpenTab;
       delete window.__ferroxShortcut;
@@ -782,6 +883,42 @@ export default function App() {
       }
     }
   }, [budget.hibernatedIds, budget.tabs]);
+
+  // Apply Auto-Hibernate Inactive Tabs timer based on the user's slider setting
+  useEffect(() => {
+    if (!limiter.autoHibernateEnabled) return;
+    const interval = window.setInterval(() => {
+      const idleIds = findIdleTabsToHibernate(
+        tabsRef.current,
+        activeTabIdRef.current,
+        splitTabId,
+        limiter,
+        Date.now()
+      );
+      if (idleIds.length === 0) return;
+      const idleSet = new Set(idleIds);
+      setTabs((prev) =>
+        prev.map((t) =>
+          idleSet.has(t.id)
+            ? { ...t, hibernated: true, estimatedRamMb: 8, estimatedCpuPercent: 0 }
+            : t
+        )
+      );
+      if (isRustNativeShell()) {
+        for (const id of idleIds) {
+          rustHibernateTab(id);
+        }
+      }
+    }, 15_000);
+    return () => window.clearInterval(interval);
+  }, [limiter, splitTabId]);
+
+  // Clear trim memory confirmation banner automatically after 8s
+  useEffect(() => {
+    if (!lastTrimNotice) return;
+    const timer = window.setTimeout(() => setLastTrimNotice(null), 8000);
+    return () => window.clearTimeout(timer);
+  }, [lastTrimNotice]);
 
   const workspaceTabs = useMemo(
     () => budget.tabs.filter((t) => t.workspace === activeWorkspace),
@@ -1704,19 +1841,46 @@ export default function App() {
       history: HistoryItem[];
       credentials: VaultCredential[];
     }) => {
+      let newBookmarks = 0;
+      let newHistory = 0;
       if (data.bookmarks.length > 0) {
-        setBookmarks((prev) => {
-          const seen = new Set(prev.map((b) => b.url));
-          const uniqueIncoming = data.bookmarks.filter((b) => !seen.has(b.url));
-          return [...prev, ...uniqueIncoming];
+        const seen = new Set(bookmarksRef.current.map((b) => b.url));
+        const uniqueIncoming = data.bookmarks.filter((b) => {
+          if (seen.has(b.url)) return false;
+          seen.add(b.url);
+          return true;
         });
+        newBookmarks = uniqueIncoming.length;
+        if (uniqueIncoming.length > 0) {
+          bookmarksRef.current = [...bookmarksRef.current, ...uniqueIncoming];
+          setBookmarks((prev) => {
+            const curSeen = new Set(prev.map((b) => b.url));
+            const fresh = uniqueIncoming.filter((b) => !curSeen.has(b.url));
+            return fresh.length > 0 ? [...prev, ...fresh] : prev;
+          });
+        }
       }
       if (data.history.length > 0) {
-        setHistory((prev) => [...data.history, ...prev].slice(0, 200));
+        const seenHist = new Set(historyRef.current.map((h) => h.url));
+        const uniqueHist = data.history.filter((h) => {
+          if (seenHist.has(h.url)) return false;
+          seenHist.add(h.url);
+          return true;
+        });
+        newHistory = uniqueHist.length;
+        if (uniqueHist.length > 0) {
+          historyRef.current = [...uniqueHist, ...historyRef.current].slice(0, 250);
+          setHistory((prev) => [...uniqueHist, ...prev].slice(0, 250));
+        }
       }
       if (data.credentials.length > 0) {
         setPendingImportedCredentials((prev) => [...data.credentials, ...prev]);
       }
+      return {
+        newBookmarks,
+        newHistory,
+        newCredentials: data.credentials.length,
+      };
     },
     []
   );
@@ -1729,8 +1893,37 @@ export default function App() {
 
   const handleRescanProfiles = useCallback(() => {
     if (!isRustNativeShell()) return;
+    setRescanningProfiles(true);
     requestRustDetectProfiles();
   }, []);
+
+  const handleTrimMemory = useCallback(() => {
+    if (isRustNativeShell()) {
+      setLastTrimNotice('Trimming WebView2 working sets...');
+      rustTrimMemory();
+      return;
+    }
+    const beforeRam = budget.totalRamMb;
+    let sleptCount = 0;
+    const nextTabs = tabsRef.current.map((t) => {
+      if (t.id !== activeTabIdRef.current && t.id !== splitTabId && !t.pinned && !t.hibernated) {
+        sleptCount += 1;
+        return { ...t, hibernated: true, estimatedRamMb: 8, estimatedCpuPercent: 0 };
+      }
+      return t;
+    });
+    if (sleptCount > 0) {
+      setTabs(nextTabs);
+    }
+    urlResponseCacheRef.current.clear();
+    const afterRam = nextTabs.reduce((s, t) => s + t.estimatedRamMb, 0);
+    const saved = Math.max(0, beforeRam - afterRam);
+    setLastTrimNotice(
+      saved > 0
+        ? `Trimmed cache & slept ${sleptCount} tab${sleptCount === 1 ? '' : 's'} · ${beforeRam} MB -> ${afterRam} MB (-${saved} MB)`
+        : `Flushed page cache · active footprint ${afterRam} MB`
+    );
+  }, [budget.totalRamMb, splitTabId]);
 
   const renderTabContent = (tab: Tab, isSplitPane: boolean) => {
     const tabUrl = tab.url;
@@ -1789,7 +1982,11 @@ export default function App() {
           detectedProfiles={detectedProfiles}
           autoSyncBrowsers={autoSyncBrowsers}
           syncingProfileId={syncingProfileId}
+          rescanningProfiles={rescanningProfiles}
+          syncedProfileIds={syncedProfileIds}
           lastSyncSummary={lastSyncSummary}
+          bookmarksCount={bookmarks.length}
+          historyCount={history.length}
           onChangeAccent={setAccent}
           onChangeCustomAccentHex={setCustomAccentHex}
           onChangeSurfaceTheme={setSurfaceTheme}
@@ -1802,6 +1999,7 @@ export default function App() {
           onToggleAutoSyncBrowsers={() => setAutoSyncBrowsers((a) => !a)}
           onRescanProfiles={handleRescanProfiles}
           onSyncProfile={handleSyncNativeProfile}
+          onOpenHubSection={handleOpenHubSection}
           onImportProfileData={handleImportProfileData}
           onClearHistory={() => setHistory([])}
           onResetDefaults={() => {
@@ -2219,12 +2417,15 @@ export default function App() {
           verticalTabs={verticalTabs}
           totalRamMb={rustTelemetry?.ramMb ?? budget.totalRamMb}
           totalCpuPercent={rustTelemetry?.cpuPercent ?? budget.totalCpuPercent}
+          processCount={rustTelemetry?.processCount}
+          lastTrimNotice={lastTrimNotice}
           shieldEnabled={shieldEnabled}
           trackerRules={trackerRules}
           blockedEvents={blockedEvents}
           privacyConfig={privacyConfig}
           onClose={() => setActiveDrawer(null)}
           onUpdateLimiter={setLimiter}
+          onTrimMemory={handleTrimMemory}
           onHibernateInactive={() => {
             if (isRustNativeShell()) {
               sendToRust('hibernate_inactive');

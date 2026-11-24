@@ -142,6 +142,8 @@ export interface Tab {
 export interface LimiterConfig {
   ramEnabled: boolean;
   ramLimitMb: number;
+  autoHibernateEnabled: boolean;
+  autoHibernateMinutes: number;
   cpuEnabled: boolean;
   cpuLimitPercent: number;
   netEnabled: boolean;
@@ -151,11 +153,37 @@ export interface LimiterConfig {
 export const DEFAULT_LIMITER_CONFIG: LimiterConfig = {
   ramEnabled: true,
   ramLimitMb: 512,
+  autoHibernateEnabled: true,
+  autoHibernateMinutes: 5,
   cpuEnabled: false,
   cpuLimitPercent: 60,
   netEnabled: false,
   netLimitKbps: 512,
 };
+
+export function findIdleTabsToHibernate(
+  tabs: Tab[],
+  activeTabId: string | null,
+  splitTabId: string | null,
+  limiter: LimiterConfig,
+  nowMs: number = Date.now()
+): string[] {
+  if (!limiter.autoHibernateEnabled || limiter.autoHibernateMinutes <= 0) {
+    return [];
+  }
+  const cutoffMs = limiter.autoHibernateMinutes * 60_000;
+  return tabs
+    .filter(
+      (t) =>
+        t.id !== activeTabId &&
+        t.id !== splitTabId &&
+        !t.pinned &&
+        !t.hibernated &&
+        !t.url.startsWith('ferrox://') &&
+        nowMs - t.lastActiveAt >= cutoffMs
+    )
+    .map((t) => t.id);
+}
 
 export interface BookmarkItem {
   id: string;

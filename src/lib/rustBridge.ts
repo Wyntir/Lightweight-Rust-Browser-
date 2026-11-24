@@ -36,6 +36,7 @@ export interface NativeProfileImportResult {
   profileId: string;
   browser: string;
   browserName: string;
+  profileName?: string;
   bookmarks: NativeImportedBookmark[];
   history: NativeImportedHistoryItem[];
   credentials: NativeImportedCredential[];
@@ -60,7 +61,14 @@ export interface RustSyncPayload {
   ramMb: number;
   ramLimitMb: number;
   ramEnabled: boolean;
+  autoHibernateEnabled?: boolean;
+  autoHibernateMinutes?: number;
+  cpuEnabled?: boolean;
+  cpuLimitPercent?: number;
+  netEnabled?: boolean;
+  netLimitKbps?: number;
   cpuPercent: number;
+  processCount?: number;
   shieldEnabled: boolean;
   blockedCount: number;
   accentHex: string;
@@ -88,6 +96,13 @@ export interface RustContentUpdatePayload {
 export interface RustTelemetryPayload {
   ramMb: number;
   cpuPercent: number;
+  processCount?: number;
+}
+
+export interface RustMemoryTrimmedPayload {
+  beforeMb: number;
+  afterMb: number;
+  processesTrimmed: number;
 }
 
 export interface RustOpenTabPayload {
@@ -142,6 +157,8 @@ declare global {
     __ferroxFullscreenChanged?: (isFullscreen: boolean) => void;
     __ferroxProfilesDetected?: (profiles: DetectedBrowserProfile[]) => void;
     __ferroxProfileImported?: (results: NativeProfileImportResult[]) => void;
+    __ferroxTabHibernated?: (tabId: string) => void;
+    __ferroxMemoryTrimmed?: (payload: RustMemoryTrimmedPayload) => void;
   }
 }
 
@@ -236,11 +253,17 @@ export function syncRustLimiter(limiter: LimiterConfig): void {
   sendToRust('set_limiter', {
     ramEnabled: limiter.ramEnabled,
     ramLimitMb: limiter.ramLimitMb,
+    autoHibernateEnabled: limiter.autoHibernateEnabled,
+    autoHibernateMinutes: limiter.autoHibernateMinutes,
     cpuEnabled: limiter.cpuEnabled,
     cpuLimitPercent: limiter.cpuLimitPercent,
     netEnabled: limiter.netEnabled,
     netLimitKbps: limiter.netLimitKbps,
   });
+}
+
+export function rustTrimMemory(): void {
+  sendToRust('trim_memory');
 }
 
 export function syncRustSearchEngine(engine: SearchEngineId): void {

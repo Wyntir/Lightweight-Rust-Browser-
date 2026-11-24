@@ -10,6 +10,7 @@ import {
 } from '../lib/browserEngine';
 import { DetectedBrowserProfile } from '../lib/rustBridge';
 import { VaultCredential } from '../lib/vaultCrypto';
+import { HubSection } from './BrowserHubView';
 import { ProfileImporterPanel, SyncSummary } from './ProfileImporterPanel';
 
 interface SettingsViewProps {
@@ -23,7 +24,11 @@ interface SettingsViewProps {
   detectedProfiles: DetectedBrowserProfile[];
   autoSyncBrowsers: boolean;
   syncingProfileId: string | null;
+  rescanningProfiles?: boolean;
+  syncedProfileIds?: string[];
   lastSyncSummary: SyncSummary | null;
+  bookmarksCount?: number;
+  historyCount?: number;
   onChangeAccent: (accent: AccentThemeId) => void;
   onChangeCustomAccentHex: (hex: string) => void;
   onChangeSurfaceTheme: (surface: SurfaceThemeId) => void;
@@ -34,11 +39,12 @@ interface SettingsViewProps {
   onToggleAutoSyncBrowsers: () => void;
   onRescanProfiles: () => void;
   onSyncProfile: (profileId: string) => void;
+  onOpenHubSection?: (section: HubSection) => void;
   onImportProfileData: (data: {
     bookmarks: BookmarkItem[];
     history: HistoryItem[];
     credentials: VaultCredential[];
-  }) => void;
+  }) => { newBookmarks: number; newHistory: number; newCredentials: number } | void;
   onClearHistory: () => void;
   onResetDefaults: () => void;
 }
@@ -54,7 +60,11 @@ export function SettingsView({
   detectedProfiles,
   autoSyncBrowsers,
   syncingProfileId,
+  rescanningProfiles,
+  syncedProfileIds,
   lastSyncSummary,
+  bookmarksCount,
+  historyCount,
   onChangeAccent,
   onChangeCustomAccentHex,
   onChangeSurfaceTheme,
@@ -65,6 +75,7 @@ export function SettingsView({
   onToggleAutoSyncBrowsers,
   onRescanProfiles,
   onSyncProfile,
+  onOpenHubSection,
   onImportProfileData,
   onClearHistory,
   onResetDefaults,
@@ -222,10 +233,15 @@ export function SettingsView({
             detectedProfiles={detectedProfiles}
             autoSyncBrowsers={autoSyncBrowsers}
             syncingProfileId={syncingProfileId}
+            rescanningProfiles={rescanningProfiles}
+            syncedProfileIds={syncedProfileIds}
             lastSyncSummary={lastSyncSummary}
+            bookmarksCount={bookmarksCount}
+            historyCount={historyCount}
             onToggleAutoSync={onToggleAutoSyncBrowsers}
             onRescanProfiles={onRescanProfiles}
             onSyncProfile={onSyncProfile}
+            onOpenHubSection={onOpenHubSection}
             onImportProfileData={onImportProfileData}
           />
         </section>

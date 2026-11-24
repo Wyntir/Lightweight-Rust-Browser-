@@ -45,6 +45,8 @@ interface DrawersProps {
   verticalTabs: boolean;
   totalRamMb: number;
   totalCpuPercent: number;
+  processCount?: number;
+  lastTrimNotice?: string | null;
   shieldEnabled: boolean;
   trackerRules: string[];
   blockedEvents: BlockedEvent[];
@@ -52,6 +54,7 @@ interface DrawersProps {
   onClose: () => void;
   onUpdateLimiter: (next: LimiterConfig) => void;
   onHibernateInactive: () => void;
+  onTrimMemory: () => void;
   onHibernateTab: (tabId: string) => void;
   onSelectTab: (tabId: string) => void;
   onSelectWorkspace: (ws: WorkspaceId) => void;
@@ -165,6 +168,8 @@ export function Drawers({
   verticalTabs,
   totalRamMb,
   totalCpuPercent,
+  processCount,
+  lastTrimNotice,
   shieldEnabled,
   trackerRules,
   blockedEvents,
@@ -172,6 +177,7 @@ export function Drawers({
   onClose,
   onUpdateLimiter,
   onHibernateInactive,
+  onTrimMemory,
   onHibernateTab,
   onSelectTab,
   onSelectWorkspace,
@@ -313,6 +319,8 @@ export function Drawers({
                     onUpdateLimiter({
                       ramEnabled: true,
                       ramLimitMb: 256,
+                      autoHibernateEnabled: true,
+                      autoHibernateMinutes: 2,
                       cpuEnabled: true,
                       cpuLimitPercent: 35,
                       netEnabled: true,
@@ -329,6 +337,8 @@ export function Drawers({
                     onUpdateLimiter({
                       ramEnabled: true,
                       ramLimitMb: 512,
+                      autoHibernateEnabled: true,
+                      autoHibernateMinutes: 5,
                       cpuEnabled: false,
                       cpuLimitPercent: 60,
                       netEnabled: false,
@@ -345,6 +355,8 @@ export function Drawers({
                     onUpdateLimiter({
                       ramEnabled: true,
                       ramLimitMb: 384,
+                      autoHibernateEnabled: true,
+                      autoHibernateMinutes: 3,
                       cpuEnabled: true,
                       cpuLimitPercent: 45,
                       netEnabled: true,
@@ -374,7 +386,7 @@ export function Drawers({
               </div>
 
               <div className="flex items-center justify-between text-[11px] text-slate-400">
-                <span>Auto-hibernate background tabs above</span>
+                <span>Trim OS working set &amp; sleep tabs above</span>
                 <span className="font-mono-tabular text-white font-semibold">{limiter.ramLimitMb} MB</span>
               </div>
 
@@ -398,14 +410,93 @@ export function Drawers({
                 <span>2G</span>
               </div>
 
-              <button
-                type="button"
-                onClick={onHibernateInactive}
-                className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg bg-white/8 hover:bg-white/14 border border-white/10 text-xs font-medium text-white transition-colors whitespace-nowrap"
-              >
-                <Zap className="w-3.5 h-3.5" style={{ color: 'var(--fx-accent)' }} aria-hidden="true" />
-                Hibernate Inactive Tabs
-              </button>
+              <div className="grid grid-cols-2 gap-2 pt-0.5">
+                <button
+                  type="button"
+                  onClick={onTrimMemory}
+                  className="flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-lg bg-white/8 hover:bg-white/14 border border-white/10 text-[11px] font-medium text-white transition-colors whitespace-nowrap"
+                >
+                  <Zap className="w-3.5 h-3.5" style={{ color: 'var(--fx-accent)' }} aria-hidden="true" />
+                  Trim RAM Now
+                </button>
+                <button
+                  type="button"
+                  onClick={onHibernateInactive}
+                  className="flex items-center justify-center gap-1.5 py-2 px-2.5 rounded-lg bg-white/8 hover:bg-white/14 border border-white/10 text-[11px] font-medium text-white transition-colors whitespace-nowrap"
+                >
+                  <PauseCircle className="w-3.5 h-3.5 text-amber-300" aria-hidden="true" />
+                  Sleep Tabs Now
+                </button>
+              </div>
+
+              {lastTrimNotice && (
+                <div className="flex items-center gap-1.5 text-[11px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 rounded-lg px-2.5 py-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  <span>{lastTrimNotice}</span>
+                </div>
+              )}
+
+              {typeof processCount === 'number' && processCount > 0 && (
+                <div className="text-[10px] text-slate-500 font-mono-tabular">
+                  Shared WebView2 pool · {processCount} process{processCount === 1 ? '' : 'es'} tracked
+                </div>
+              )}
+            </div>
+
+            {/* Auto-Hibernate Inactive Tabs Slider Card */}
+            <div className="p-3.5 rounded-xl bg-black/25 border border-white/10 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <label htmlFor="hibernate-slider-toggle" className="flex items-center gap-2 text-xs font-semibold text-white">
+                  <PauseCircle className="w-3.5 h-3.5 text-amber-300" aria-hidden="true" />
+                  Hibernate Inactive Tabs
+                </label>
+                <ToggleSwitch
+                  id="hibernate-slider-toggle"
+                  label="Hibernate Inactive Tabs"
+                  checked={limiter.autoHibernateEnabled}
+                  onToggle={() =>
+                    onUpdateLimiter({
+                      ...limiter,
+                      autoHibernateEnabled: !limiter.autoHibernateEnabled,
+                    })
+                  }
+                />
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-slate-400">
+                <span>Sleep background tabs after idle</span>
+                <span className="font-mono-tabular text-white font-semibold">
+                  {limiter.autoHibernateEnabled ? `${limiter.autoHibernateMinutes} min` : 'Off'}
+                </span>
+              </div>
+
+              <input
+                type="range"
+                aria-label="Hibernate inactive tabs after minutes"
+                min={1}
+                max={60}
+                step={1}
+                disabled={!limiter.autoHibernateEnabled}
+                value={limiter.autoHibernateMinutes}
+                onChange={(e) =>
+                  onUpdateLimiter({
+                    ...limiter,
+                    autoHibernateMinutes: Number(e.target.value),
+                  })
+                }
+                className="w-full cursor-pointer disabled:opacity-40"
+                style={{ accentColor: '#F59E0B' }}
+              />
+              <div className="flex justify-between font-mono-tabular text-[10px] text-slate-500">
+                <span>1m</span>
+                <span>5m</span>
+                <span>15m</span>
+                <span>30m</span>
+                <span>60m</span>
+              </div>
+              <p className="text-[11px] text-slate-500 leading-snug">
+                Destroys idle tab WebViews &amp; frees their renderer RAM until you click the tab again.
+              </p>
             </div>
 
             {/* Network Limiter Card */}

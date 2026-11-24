@@ -327,6 +327,33 @@ test('duplicateTab clones tab URL, title, workspace, group, privacy, and history
   assert.equal(copy.historyIndex, original.historyIndex);
 });
 
+import { findIdleTabsToHibernate } from './browserEngine';
 
+test('findIdleTabsToHibernate respects slider threshold and skips active, split, pinned, and internal tabs', () => {
+  const now = 1_000_000;
+  const active = createTab('tab-1', 'personal', 'https://youtube.com', now - 600_000);
+  const idleOld = createTab('tab-2', 'personal', 'https://mail.google.com', now - 400_000);
+  const idleFresh = createTab('tab-3', 'personal', 'https://reddit.com', now - 60_000);
+  const pinnedOld = { ...createTab('tab-4', 'personal', 'https://docs.rs', now - 900_000), pinned: true };
+  const splitOld = createTab('tab-5', 'personal', 'https://github.com', now - 900_000);
+  const internalOld = createTab('tab-6', 'personal', 'ferrox://speed-dial', now - 900_000);
 
+  const limiter = { ...DEFAULT_LIMITER_CONFIG, autoHibernateEnabled: true, autoHibernateMinutes: 5 };
+  const victims = findIdleTabsToHibernate(
+    [active, idleOld, idleFresh, pinnedOld, splitOld, internalOld],
+    'tab-1',
+    'tab-5',
+    limiter,
+    now
+  );
+  assert.deepEqual(victims, ['tab-2']);
 
+  const disabled = findIdleTabsToHibernate(
+    [active, idleOld],
+    'tab-1',
+    null,
+    { ...limiter, autoHibernateEnabled: false },
+    now
+  );
+  assert.deepEqual(disabled, []);
+});

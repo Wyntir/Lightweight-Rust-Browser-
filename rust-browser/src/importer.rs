@@ -53,6 +53,7 @@ pub struct ProfileImportResult {
     pub profile_id: String,
     pub browser: String,
     pub browser_name: String,
+    pub profile_name: String,
     pub bookmarks: Vec<ImportedBookmark>,
     pub history: Vec<ImportedHistoryItem>,
     pub credentials: Vec<ImportedCredential>,
@@ -109,7 +110,7 @@ impl Drop for TempSqliteCopy {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BrowserEngineKind {
-    ChromiumSingleDir,
+    OperaFamilyDir,
     ChromiumMultiProfile,
     GeckoProfilesRoot,
     SafariDir,
@@ -122,22 +123,76 @@ struct BrowserRootSpec {
     root_dir: PathBuf,
 }
 
+#[cfg(target_os = "windows")]
+fn push_opera_software_dir_specs(opera_software_dir: &Path, specs: &mut Vec<BrowserRootSpec>) {
+    if !opera_software_dir.is_dir() {
+        return;
+    }
+    if let Ok(entries) = fs::read_dir(opera_software_dir) {
+        let mut dirs_found: Vec<(String, PathBuf)> = entries
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                if !p.is_dir() {
+                    return None;
+                }
+                let name = p.file_name()?.to_str()?.to_string();
+                Some((name, p))
+            })
+            .collect();
+        dirs_found.sort_by(|a, b| a.0.cmp(&b.0));
+
+        for (folder_name, path) in dirs_found {
+            let lower = folder_name.to_ascii_lowercase();
+            if lower.contains("gx") {
+                specs.push(BrowserRootSpec {
+                    slug: "operagx",
+                    name: "Opera GX",
+                    kind: BrowserEngineKind::OperaFamilyDir,
+                    root_dir: path,
+                });
+            } else if lower.contains("opera") && !lower.contains("crash") && !lower.contains("installer") {
+                specs.push(BrowserRootSpec {
+                    slug: "opera",
+                    name: "Opera",
+                    kind: BrowserEngineKind::OperaFamilyDir,
+                    root_dir: path,
+                });
+            }
+        }
+    }
+}
+
 fn all_browser_root_specs() -> Vec<BrowserRootSpec> {
     let mut specs = Vec::new();
 
     #[cfg(target_os = "windows")]
     {
+        let mut roaming_candidates: Vec<PathBuf> = Vec::new();
         if let Some(roaming) = dirs::config_dir() {
+            roaming_candidates.push(roaming);
+        }
+        if let Some(home) = dirs::home_dir() {
+            let fallback_roaming = home.join("AppData").join("Roaming");
+            if !roaming_candidates.iter().any(|p| p == &fallback_roaming) {
+                roaming_candidates.push(fallback_roaming);
+            }
+        }
+
+        for roaming in &roaming_candidates {
+            // Dynamically scan all folders under AppData\Roaming\Opera Software\*
+            // (covers Opera GX Stable, Opera GX, Opera GX Early Bird, Opera Stable, Opera Air, etc.)
+            push_opera_software_dir_specs(&roaming.join("Opera Software"), &mut specs);
             specs.push(BrowserRootSpec {
                 slug: "operagx",
                 name: "Opera GX",
-                kind: BrowserEngineKind::ChromiumSingleDir,
+                kind: BrowserEngineKind::OperaFamilyDir,
                 root_dir: roaming.join("Opera Software").join("Opera GX Stable"),
             });
             specs.push(BrowserRootSpec {
                 slug: "opera",
                 name: "Opera",
-                kind: BrowserEngineKind::ChromiumSingleDir,
+                kind: BrowserEngineKind::OperaFamilyDir,
                 root_dir: roaming.join("Opera Software").join("Opera Stable"),
             });
             specs.push(BrowserRootSpec {
@@ -167,6 +222,33 @@ fn all_browser_root_specs() -> Vec<BrowserRootSpec> {
         }
 
         if let Some(local) = dirs::data_local_dir() {
+            // Some Opera GX builds / portable setups store profile data in LocalAppData
+            push_opera_software_dir_specs(&local.join("Opera Software"), &mut specs);
+            // Microsoft Store / MSIX sandboxed Opera GX installs
+            let packages = local.join("Packages");
+            if let Ok(entries) = fs::read_dir(&packages) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                    if name.contains("opera") {
+                        push_opera_software_dir_specs(
+                            &entry
+                                .path()
+                                .join("LocalCache")
+                                .join("Roaming")
+                                .join("Opera Software"),
+                            &mut specs,
+                        );
+                        push_opera_software_dir_specs(
+                            &entry
+                                .path()
+                                .join("LocalCache")
+                                .join("Local")
+                                .join("Opera Software"),
+                            &mut specs,
+                        );
+                    }
+                }
+            }
             specs.push(BrowserRootSpec {
                 slug: "chrome",
                 name: "Google Chrome",
@@ -232,13 +314,13 @@ fn all_browser_root_specs() -> Vec<BrowserRootSpec> {
             specs.push(BrowserRootSpec {
                 slug: "operagx",
                 name: "Opera GX",
-                kind: BrowserEngineKind::ChromiumSingleDir,
+                kind: BrowserEngineKind::OperaFamilyDir,
                 root_dir: cfg.join("com.operasoftware.OperaGX"),
             });
             specs.push(BrowserRootSpec {
                 slug: "opera",
                 name: "Opera",
-                kind: BrowserEngineKind::ChromiumSingleDir,
+                kind: BrowserEngineKind::OperaFamilyDir,
                 root_dir: cfg.join("com.operasoftware.Opera"),
             });
             specs.push(BrowserRootSpec {
@@ -312,13 +394,13 @@ fn all_browser_root_specs() -> Vec<BrowserRootSpec> {
             specs.push(BrowserRootSpec {
                 slug: "operagx",
                 name: "Opera GX",
-                kind: BrowserEngineKind::ChromiumSingleDir,
+                kind: BrowserEngineKind::OperaFamilyDir,
                 root_dir: cfg.join("opera-gx"),
             });
             specs.push(BrowserRootSpec {
                 slug: "opera",
                 name: "Opera",
-                kind: BrowserEngineKind::ChromiumSingleDir,
+                kind: BrowserEngineKind::OperaFamilyDir,
                 root_dir: cfg.join("opera"),
             });
             specs.push(BrowserRootSpec {
@@ -820,8 +902,55 @@ fn try_read_exported_passwords_csv(profile_dir: &Path, candidates: &[&str]) -> V
     Vec::new()
 }
 
+fn enumerate_opera_profile_dirs(root_dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
+    if !root_dir.is_dir() {
+        return candidates;
+    }
+
+    // 1. Direct root folder (classic Opera / Opera GX Stable layout)
+    candidates.push(("Default".to_string(), root_dir.to_path_buf()));
+
+    // 2. Standard Chromium multi-profile folders (Default, Profile 1, ...)
+    for (name, path) in enumerate_chromium_profile_dirs(root_dir) {
+        let label = if name == "Default" {
+            "Default Profile".to_string()
+        } else {
+            name
+        };
+        candidates.push((label, path));
+    }
+
+    // 3. Opera GX GX-Profiles / _side_profiles/<profile_id>
+    let side_profiles = root_dir.join("_side_profiles");
+    if let Ok(entries) = fs::read_dir(&side_profiles) {
+        let mut side_list: Vec<(String, PathBuf)> = entries
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                if !p.is_dir() {
+                    return None;
+                }
+                let name = p.file_name()?.to_str()?.to_string();
+                Some((format!("GX Profile ({})", name), p))
+            })
+            .collect();
+        side_list.sort_by(|a, b| a.0.cmp(&b.0));
+        for (label, sp) in side_list {
+            let nested_default = sp.join("Default");
+            if nested_default.is_dir() {
+                candidates.push((label.clone(), nested_default));
+            }
+            candidates.push((label, sp));
+        }
+    }
+
+    candidates
+}
+
 fn push_chromium_profile(
     detected: &mut Vec<DetectedBrowserProfile>,
+    seen_paths: &mut std::collections::HashSet<String>,
     slug: &str,
     browser_name: &str,
     profile_name: &str,
@@ -830,18 +959,35 @@ fn push_chromium_profile(
     if !dir.is_dir() {
         return;
     }
+    let normalized_path = dir
+        .canonicalize()
+        .unwrap_or_else(|_| dir.to_path_buf())
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    if !seen_paths.insert(normalized_path) {
+        return;
+    }
+
     let bm_path = dir.join("Bookmarks");
     let hist_path = dir.join("History");
     let logins_path = dir.join("Login Data");
     let has_bookmarks = bm_path.is_file();
     let has_history = hist_path.is_file();
     let has_logins_file = logins_path.is_file();
-    if !has_bookmarks && !has_history {
+    if !has_bookmarks && !has_history && !has_logins_file {
         return;
     }
-    let id_suffix = profile_name.to_ascii_lowercase().replace(' ', "_");
+    let id_suffix = profile_name
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect::<String>();
+    let mut id = format!("{}:{}", slug, id_suffix);
+    if detected.iter().any(|p| p.id == id) {
+        id = format!("{}_{}", id, detected.len() + 1);
+    }
     detected.push(DetectedBrowserProfile {
-        id: format!("{}:{}", slug, id_suffix),
+        id,
         browser: slug.to_string(),
         browser_name: browser_name.to_string(),
         profile_name: profile_name.to_string(),
@@ -864,22 +1010,27 @@ fn push_chromium_profile(
 
 pub fn detect_installed_profiles() -> Vec<DetectedBrowserProfile> {
     let mut detected = Vec::new();
+    let mut seen_paths = std::collections::HashSet::new();
 
     for spec in all_browser_root_specs() {
         match spec.kind {
-            BrowserEngineKind::ChromiumSingleDir => {
-                push_chromium_profile(
-                    &mut detected,
-                    spec.slug,
-                    spec.name,
-                    "Default",
-                    &spec.root_dir,
-                );
+            BrowserEngineKind::OperaFamilyDir => {
+                for (prof_name, prof_dir) in enumerate_opera_profile_dirs(&spec.root_dir) {
+                    push_chromium_profile(
+                        &mut detected,
+                        &mut seen_paths,
+                        spec.slug,
+                        spec.name,
+                        &prof_name,
+                        &prof_dir,
+                    );
+                }
             }
             BrowserEngineKind::ChromiumMultiProfile => {
                 for (prof_name, prof_dir) in enumerate_chromium_profile_dirs(&spec.root_dir) {
                     push_chromium_profile(
                         &mut detected,
+                        &mut seen_paths,
                         spec.slug,
                         spec.name,
                         &prof_name,
@@ -904,6 +1055,14 @@ pub fn detect_installed_profiles() -> Vec<DetectedBrowserProfile> {
                     });
 
                     for profile_dir in dirs_list {
+                        let norm = profile_dir
+                            .canonicalize()
+                            .unwrap_or_else(|_| profile_dir.clone())
+                            .to_string_lossy()
+                            .to_ascii_lowercase();
+                        if !seen_paths.insert(norm) {
+                            continue;
+                        }
                         let folder_name = profile_dir
                             .file_name()
                             .and_then(|n| n.to_str())
@@ -988,6 +1147,7 @@ pub fn import_profile_by_id(profile_id: &str) -> Vec<ProfileImportResult> {
                     profile_id: profile.id,
                     browser: profile.browser,
                     browser_name: profile.browser_name,
+                    profile_name: profile.profile_name,
                     bookmarks,
                     history,
                     credentials,
@@ -1007,6 +1167,7 @@ pub fn import_profile_by_id(profile_id: &str) -> Vec<ProfileImportResult> {
                     profile_id: profile.id,
                     browser: profile.browser,
                     browser_name: profile.browser_name,
+                    profile_name: profile.profile_name,
                     bookmarks: Vec::new(),
                     history,
                     credentials,
@@ -1038,6 +1199,7 @@ pub fn import_profile_by_id(profile_id: &str) -> Vec<ProfileImportResult> {
                     profile_id: profile.id,
                     browser: profile.browser,
                     browser_name: profile.browser_name,
+                    profile_name: profile.profile_name,
                     bookmarks,
                     history,
                     credentials,

@@ -26,6 +26,14 @@ pub struct BrowserConfig {
     pub vpn_region: String,
     pub homepage: String,
     pub auto_sync_browsers: bool,
+    pub ram_enabled: bool,
+    pub ram_limit_mb: u64,
+    pub auto_hibernate_enabled: bool,
+    pub auto_hibernate_minutes: u64,
+    pub cpu_enabled: bool,
+    pub cpu_limit_percent: u32,
+    pub net_enabled: bool,
+    pub net_limit_kbps: u64,
 }
 
 impl Default for BrowserConfig {
@@ -44,6 +52,14 @@ impl Default for BrowserConfig {
             vpn_region: "US East".to_string(),
             homepage: "ferrox://speed-dial".to_string(),
             auto_sync_browsers: true,
+            ram_enabled: true,
+            ram_limit_mb: 512,
+            auto_hibernate_enabled: true,
+            auto_hibernate_minutes: 5,
+            cpu_enabled: false,
+            cpu_limit_percent: 60,
+            net_enabled: false,
+            net_limit_kbps: 1024,
         }
     }
 }
