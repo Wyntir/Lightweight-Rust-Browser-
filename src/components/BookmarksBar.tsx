@@ -5,6 +5,8 @@ import { BookmarkItem } from '../lib/browserEngine';
 interface BookmarksBarProps {
   bookmarks: BookmarkItem[];
   onNavigate: (url: string) => void;
+  onOpenBackgroundTab?: (url: string) => void;
+  onHoverUrl?: (url: string | null) => void;
   onUnpinFromBar: (id: string) => void;
   onOpenManager: () => void;
 }
@@ -12,6 +14,8 @@ interface BookmarksBarProps {
 export const BookmarksBar = memo(function BookmarksBar({
   bookmarks,
   onNavigate,
+  onOpenBackgroundTab,
+  onHoverUrl,
   onUnpinFromBar,
   onOpenManager,
 }: BookmarksBarProps) {
@@ -29,7 +33,7 @@ export const BookmarksBar = memo(function BookmarksBar({
       <div className="flex items-center gap-1 min-w-0">
         {barBookmarks.length === 0 ? (
           <span className="text-[11px] text-slate-500">
-            No bookmarks pinned to bar. Star a page or open Bookmarks Manager.
+            No bookmarks pinned to bar. Star a page or press Ctrl+D to bookmark.
           </span>
         ) : (
           barBookmarks.slice(0, 12).map((bm) => (
@@ -39,9 +43,27 @@ export const BookmarksBar = memo(function BookmarksBar({
             >
               <button
                 type="button"
-                onClick={() => onNavigate(bm.url)}
+                onClick={(e) => {
+                  if ((e.ctrlKey || e.metaKey) && onOpenBackgroundTab) {
+                    e.preventDefault();
+                    onOpenBackgroundTab(bm.url);
+                    return;
+                  }
+                  onNavigate(bm.url);
+                }}
+                onMouseDown={(e) => {
+                  if (e.button === 1) e.preventDefault();
+                }}
+                onAuxClick={(e) => {
+                  if (e.button === 1 && onOpenBackgroundTab) {
+                    e.preventDefault();
+                    onOpenBackgroundTab(bm.url);
+                  }
+                }}
+                onMouseEnter={() => onHoverUrl?.(bm.url)}
+                onMouseLeave={() => onHoverUrl?.(null)}
                 className="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white whitespace-nowrap"
-                title={bm.url}
+                title={`${bm.title} (${bm.url})`}
               >
                 {bm.url.startsWith('ferrox://') ? (
                   <Terminal

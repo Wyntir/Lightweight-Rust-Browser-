@@ -85,6 +85,8 @@ export interface RustSyncPayload {
   vpnRegion?: string;
   vaultCount: number;
   autoSyncBrowsers?: boolean;
+  initialUrl?: string | null;
+  initialPrivate?: boolean;
 }
 
 export interface RustContentUpdatePayload {
@@ -127,6 +129,8 @@ export interface RustAdBlockedPayload {
 
 export type BrowserShortcutCommand =
   | 'new_tab'
+  | 'new_window'
+  | 'new_private_tab'
   | 'close_tab'
   | 'reopen_tab'
   | 'next_tab'
@@ -137,10 +141,24 @@ export type BrowserShortcutCommand =
   | 'forward'
   | 'find_in_page'
   | 'tab_search'
+  | 'bookmark_page'
+  | 'open_history'
+  | 'open_downloads'
+  | 'toggle_bookmarks_bar'
+  | 'mute_tab'
   | 'zoom_in'
   | 'zoom_out'
   | 'zoom_reset'
-  | 'toggle_fullscreen';
+  | 'toggle_fullscreen'
+  | 'tab_1'
+  | 'tab_2'
+  | 'tab_3'
+  | 'tab_4'
+  | 'tab_5'
+  | 'tab_6'
+  | 'tab_7'
+  | 'tab_8'
+  | 'tab_last';
 
 declare global {
   interface Window {
@@ -285,4 +303,25 @@ export function syncRustAutoSync(enabled: boolean): void {
 export function syncRustShield(enabled: boolean, rules: string[]): void {
   sendToRust('set_shield', { enabled, rules });
 }
+
+export function rustDetachTabWindow(
+  url: string,
+  options?: { x?: number; y?: number; isPrivate?: boolean }
+): void {
+  sendToRust('detach_tab_window', {
+    url,
+    left: options?.x,
+    top: options?.y,
+    isPrivate: Boolean(options?.isPrivate),
+  });
+}
+
+export function rustOpenNewWindow(url: string = 'ferrox://speed-dial', isPrivate: boolean = false): void {
+  sendToRust('open_new_window', { url, isPrivate });
+}
+
+export function rustTabMute(tabId: string, muted: boolean): void {
+  sendToRust('tab_mute', { tabId, enabled: muted });
+}
+
 

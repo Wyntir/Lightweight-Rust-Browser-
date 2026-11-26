@@ -44,8 +44,8 @@ impl Default for BrowserConfig {
             custom_accent_hex: "#FA1E4E".to_string(),
             surface_theme: "obsidian".to_string(),
             hardware_acceleration: true,
-            search_engine: "https://duckduckgo.com/?q=".to_string(),
-            search_engine_id: "duckduckgo".to_string(),
+            search_engine: "https://www.google.com/search?q=".to_string(),
+            search_engine_id: "google".to_string(),
             vertical_tabs: false,
             show_bookmarks_bar: true,
             vpn_enabled: false,
@@ -98,16 +98,12 @@ impl BrowserCore {
     pub fn new(config: BrowserConfig) -> Self {
         let bookmarks = vec![
             Bookmark {
-                title: "Rust Language".to_string(),
-                url: "https://www.rust-lang.org".to_string(),
+                title: "Google".to_string(),
+                url: "https://www.google.com".to_string(),
             },
             Bookmark {
-                title: "Docs.rs".to_string(),
-                url: "https://docs.rs".to_string(),
-            },
-            Bookmark {
-                title: "Crates.io".to_string(),
-                url: "https://crates.io".to_string(),
+                title: "YouTube".to_string(),
+                url: "https://www.youtube.com".to_string(),
             },
             Bookmark {
                 title: "Wikipedia".to_string(),

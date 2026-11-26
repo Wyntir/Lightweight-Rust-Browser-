@@ -17,6 +17,7 @@ import {
   DEFAULT_SITE_PERMISSIONS,
   DEFAULT_TRACKER_RULES,
   deriveTitleFromUrl,
+  detectUserGeoFromTimezone,
   DownloadItem,
   duplicateTab,
   evaluateResourceBudget,
@@ -24,13 +25,18 @@ import {
   findIdleTabsToHibernate,
   getNextTabId,
   getOriginFromUrl,
+  getTabsToRight,
+  getVpnServersWithLocationPing,
   hexToRgbaSoft,
   HistoryItem,
   LimiterConfig,
+  mergeDefaultTrackerRules,
+  migrateLegacyBookmarks,
   normalizeAddressInput,
   PermissionValue,
   PersistedSessionTab,
   PrivacySecurityConfig,
+  reorderTabs,
   restoreSessionTabs,
   scanDownloadFilename,
   SearchEngineId,
@@ -45,10 +51,11 @@ import {
   TabGroup,
   TabGroupColor,
   tabHistoryNavigate,
+  WORKSPACES,
   WorkspaceId,
 } from './lib/browserEngine';
 import { EncryptedVaultPayload, VaultCredential } from './lib/vaultCrypto';
-import { TabStrip, VerticalTabRail } from './components/TabStrip';
+import { DetachDropPoint, TabStrip, VerticalTabRail } from './components/TabStrip';
 import { AddressToolbar } from './components/AddressToolbar';
 import { BookmarksBar } from './components/BookmarksBar';
 import { FindInPageBar } from './components/FindInPageBar';
@@ -62,6 +69,7 @@ import { DocsView } from './components/DocsView';
 import { BrowserHubView, HubSection } from './components/BrowserHubView';
 import { TabSearchModal } from './components/TabSearchModal';
 import { PipWindow } from './components/PipWindow';
+import { DetachedWindow, DetachedWindowState } from './components/DetachedWindow';
 import { QuickSettingsPopover } from './components/QuickSettingsPopover';
 import {
   BrowserShortcutCommand,
@@ -72,15 +80,18 @@ import {
   requestRustImportProfile,
   rustActivateTab,
   rustCloseTab,
+  rustDetachTabWindow,
   rustHibernateTab,
   rustNavigateTab,
   rustOpenDownloadFile,
+  rustOpenNewWindow,
   rustShowDownloadInFolder,
   RustSyncPayload,
   rustTabBack,
   rustTabFind,
   rustTabFindClear,
   rustTabForward,
+  rustTabMute,
   rustTabReload,
   rustTabZoom,
   rustToggleFullscreen,
@@ -148,7 +159,7 @@ export default function App() {
     initialSaved.surfaceTheme ?? 'obsidian'
   );
   const [searchEngine, setSearchEngine] = useState<SearchEngineId>(
-    initialSaved.searchEngine ?? 'duckduckgo'
+    initialSaved.searchEngine ?? 'google'
   );
   const [limiter, setLimiter] = useState<LimiterConfig>(() => ({
     ...DEFAULT_LIMITER_CONFIG,
@@ -157,11 +168,11 @@ export default function App() {
   const [shieldEnabled, setShieldEnabled] = useState<boolean>(
     initialSaved.shieldEnabled ?? true
   );
-  const [trackerRules, setTrackerRules] = useState<string[]>(
-    initialSaved.trackerRules ?? DEFAULT_TRACKER_RULES
+  const [trackerRules, setTrackerRules] = useState<string[]>(() =>
+    mergeDefaultTrackerRules(initialSaved.trackerRules)
   );
-  const [bookmarks, setBookmarks] = useState<BookmarkItem[]>(
-    initialSaved.bookmarks ?? DEFAULT_BOOKMARKS
+  const [bookmarks, setBookmarks] = useState<BookmarkItem[]>(() =>
+    migrateLegacyBookmarks(initialSaved.bookmarks)
   );
   const [history, setHistory] = useState<HistoryItem[]>(initialSaved.history ?? []);
   const [blockedEvents, setBlockedEvents] = useState<BlockedEvent[]>([]);
@@ -238,6 +249,10 @@ export default function App() {
   const [quickSettingsOpen, setQuickSettingsOpen] = useState(false);
   const [toolbarPopoverOpen, setToolbarPopoverOpen] = useState(false);
   const [tabContextMenuOpen, setTabContextMenuOpen] = useState(false);
+  const [tabDragOverlayOpen, setTabDragOverlayOpen] = useState(false);
+  const [detachedWindows, setDetachedWindows] = useState<DetachedWindowState[]>([]);
+  const [hoveredUrl, setHoveredUrl] = useState<string | null>(null);
+  const [closedTabsCount, setClosedTabsCount] = useState(0);
   const [pendingImportedCredentials, setPendingImportedCredentials] = useState<VaultCredential[]>([]);
   const [tabSearchOpen, setTabSearchOpen] = useState(false);
   const [hubInitialSection, setHubInitialSection] = useState<HubSection>('bookmarks');
@@ -276,6 +291,9 @@ export default function App() {
   const [syncedProfileIds, setSyncedProfileIds] = useState<string[]>([]);
   const [lastSyncSummary, setLastSyncSummary] = useState<SyncSummary | null>(null);
   const [lastTrimNotice, setLastTrimNotice] = useState<string | null>(null);
+  const userGeo = useMemo(() => detectUserGeoFromTimezone(), []);
+  const [vpnJitterMap, setVpnJitterMap] = useState<Record<string, number>>({});
+  const [vpnPinging, setVpnPinging] = useState(false);
 
   const [rustTelemetry, setRustTelemetry] = useState<{
     ramMb: number;
@@ -284,6 +302,8 @@ export default function App() {
   } | null>(null);
 
   const tabCounterRef = useRef(restoredSession.nextCounter);
+  const detachedCounterRef = useRef(1);
+  const detachedZRef = useRef(42);
   const autofillCounterRef = useRef(1);
   const findCounterRef = useRef(1);
   const closedTabsRef = useRef<Tab[]>([]);
@@ -345,15 +365,24 @@ export default function App() {
       } else if (mod && !e.altKey) {
         if (key === 't' && e.shiftKey) cmd = 'reopen_tab';
         else if (key === 't' && !e.shiftKey) cmd = 'new_tab';
+        else if (key === 'n' && e.shiftKey) cmd = 'new_private_tab';
+        else if (key === 'n' && !e.shiftKey) cmd = 'new_window';
         else if (key === 'w' && !e.shiftKey) cmd = 'close_tab';
         else if (e.key === 'Tab' && e.shiftKey) cmd = 'prev_tab';
         else if (e.key === 'Tab' && !e.shiftKey) cmd = 'next_tab';
         else if (key === 'l') cmd = 'focus_omnibox';
         else if (key === 'f') cmd = 'find_in_page';
         else if (key === 'k') cmd = 'tab_search';
+        else if (key === 'd' && !e.shiftKey) cmd = 'bookmark_page';
+        else if (key === 'h' && !e.shiftKey) cmd = 'open_history';
+        else if (key === 'j' && !e.shiftKey) cmd = 'open_downloads';
+        else if (key === 'b' && e.shiftKey) cmd = 'toggle_bookmarks_bar';
+        else if (key === 'm' && !e.shiftKey) cmd = 'mute_tab';
         else if (key === '=' || key === '+') cmd = 'zoom_in';
         else if (key === '-') cmd = 'zoom_out';
         else if (key === '0') cmd = 'zoom_reset';
+        else if (!e.shiftKey && key >= '1' && key <= '8') cmd = `tab_${key}` as BrowserShortcutCommand;
+        else if (!e.shiftKey && key === '9') cmd = 'tab_last';
       }
 
       if (cmd) {
@@ -483,11 +512,26 @@ export default function App() {
           setSurfaceTheme(payload.surfaceTheme);
         }
         if (
+          payload.searchEngine === 'google' ||
           payload.searchEngine === 'duckduckgo' ||
           payload.searchEngine === 'wikipedia' ||
           payload.searchEngine === 'crates'
         ) {
           setSearchEngine(payload.searchEngine);
+        }
+        if (payload.initialUrl && payload.initialUrl.trim()) {
+          const initTabId = `tab-${tabCounterRef.current++}`;
+          const initTab = createTab(initTabId, 'personal', payload.initialUrl, Date.now(), {
+            isPrivate: Boolean(payload.initialPrivate),
+          });
+          setTabs([initTab]);
+          setActiveWorkspace('personal');
+          setActiveTabId(initTabId);
+          if (!initTab.url.startsWith('ferrox://')) {
+            rustNavigateTab(initTabId, initTab.url, { isPrivate: initTab.isPrivate, background: false });
+          } else {
+            rustActivateTab(initTabId, initTab.url, initTab.isPrivate);
+          }
         }
         if (typeof payload.verticalTabs === 'boolean') {
           setVerticalTabs(payload.verticalTabs);
@@ -925,9 +969,36 @@ export default function App() {
     [budget.tabs, activeWorkspace]
   );
 
+  const activeWorkspaceMeta = useMemo(
+    () => WORKSPACES.find((w) => w.id === activeWorkspace) ?? WORKSPACES[0],
+    [activeWorkspace]
+  );
+
+  const vpnServers = useMemo(
+    () => getVpnServersWithLocationPing(userGeo, privacyConfig.vpnProtocol, vpnJitterMap),
+    [userGeo, privacyConfig.vpnProtocol, vpnJitterMap]
+  );
+
+  const currentVpnServer = useMemo(
+    () => vpnServers.find((s) => s.region === privacyConfig.vpnRegion) ?? vpnServers[0],
+    [vpnServers, privacyConfig.vpnRegion]
+  );
+
+  const handleRefreshVpnPing = useCallback(() => {
+    setVpnPinging(true);
+    window.setTimeout(() => {
+      const nextJitter: Record<string, number> = {};
+      for (const srv of vpnServers) {
+        nextJitter[srv.region] = Math.round((Math.random() - 0.5) * 6);
+      }
+      setVpnJitterMap(nextJitter);
+      setVpnPinging(false);
+    }, 280);
+  }, [vpnServers]);
+
   const activeTab = useMemo(
-    () => budget.tabs.find((t) => t.id === activeTabId) ?? workspaceTabs[0] ?? null,
-    [budget.tabs, activeTabId, workspaceTabs]
+    () => workspaceTabs.find((t) => t.id === activeTabId) ?? workspaceTabs[0] ?? null,
+    [workspaceTabs, activeTabId]
   );
 
   const splitTab = useMemo(
@@ -955,6 +1026,8 @@ export default function App() {
         tabSearchOpen ||
         toolbarPopoverOpen ||
         tabContextMenuOpen ||
+        tabDragOverlayOpen ||
+        detachedWindows.length > 0 ||
         Boolean(pipTabId);
       const left = Math.round(rect.left);
       const top = Math.round(rect.top);
@@ -988,6 +1061,7 @@ export default function App() {
   }, [
     activeTab,
     activeDrawer,
+    detachedWindows.length,
     downloadShelfId,
     findOpen,
     pipTabId,
@@ -995,6 +1069,7 @@ export default function App() {
     showBookmarksBar,
     splitTab,
     tabContextMenuOpen,
+    tabDragOverlayOpen,
     tabSearchOpen,
     toolbarPopoverOpen,
     verticalTabs,
@@ -1279,14 +1354,6 @@ export default function App() {
     [fetchExternalUrl, searchEngine, tabs]
   );
 
-  const handleOpenUrl = useCallback(
-    (rawInput: string) => {
-      if (!activeTab) return;
-      navigateTab(activeTab.id, rawInput);
-    },
-    [activeTab, navigateTab]
-  );
-
   const handleNewTab = useCallback(
     (
       initialUrl: string = 'ferrox://speed-dial',
@@ -1311,6 +1378,18 @@ export default function App() {
     [activeWorkspace, fetchExternalUrl, privacyConfig.vpnAutoConnectPrivate, privacyConfig.vpnEnabled]
   );
 
+  const handleOpenUrl = useCallback(
+    (rawInput: string) => {
+      const normalized = normalizeAddressInput(rawInput, searchEngine);
+      if (!activeTab) {
+        handleNewTab(normalized, false, false);
+        return;
+      }
+      navigateTab(activeTab.id, rawInput);
+    },
+    [activeTab, handleNewTab, navigateTab, searchEngine]
+  );
+
   const handleOpenBackgroundTab = useCallback(
     (rawUrl: string) => {
       handleNewTab(rawUrl, false, true);
@@ -1328,6 +1407,7 @@ export default function App() {
       const closing = currentTabs.find((t) => t.id === id);
       if (closing && !closing.isPrivate) {
         closedTabsRef.current = [...closedTabsRef.current.slice(-24), closing];
+        setClosedTabsCount(closedTabsRef.current.length);
       }
       if (isRustNativeShell()) {
         rustCloseTab(id);
@@ -1355,13 +1435,8 @@ export default function App() {
       const wsRemaining = remaining.filter((t) => t.workspace === activeWorkspace);
 
       if (wsRemaining.length === 0) {
-        const replacement = createTab(
-          `tab-${tabCounterRef.current++}`,
-          activeWorkspace,
-          'ferrox://speed-dial'
-        );
-        setTabs([...remaining, replacement]);
-        setActiveTabId(replacement.id);
+        setTabs(remaining);
+        setActiveTabId('');
         if (isRustNativeShell()) {
           sendToRust('set_active_url', { url: 'ferrox://speed-dial' });
         }
@@ -1382,6 +1457,7 @@ export default function App() {
 
   const handleReopenClosedTab = useCallback(() => {
     const popped = closedTabsRef.current.pop();
+    setClosedTabsCount(closedTabsRef.current.length);
     if (!popped) return;
     const restoredId = `tab-${tabCounterRef.current++}`;
     const restored: Tab = {
@@ -1482,6 +1558,7 @@ export default function App() {
           rustCloseTab(closing.id);
         }
       }
+      setClosedTabsCount(closedTabsRef.current.length);
 
       const closedIds = new Set(toClose.map((t) => t.id));
       setPageCache((prev) => {
@@ -1510,6 +1587,271 @@ export default function App() {
     [activeWorkspace, pipTabId, splitTabId]
   );
 
+  const handleCloseTabsToRight = useCallback(
+    (sourceId: string) => {
+      const currentTabs = tabsRef.current;
+      const toClose = getTabsToRight(currentTabs, activeWorkspace, sourceId);
+      if (toClose.length === 0) return;
+
+      for (const closing of toClose) {
+        if (!closing.isPrivate) {
+          closedTabsRef.current = [...closedTabsRef.current.slice(-24), closing];
+        }
+        if (isRustNativeShell()) {
+          rustCloseTab(closing.id);
+        }
+      }
+      setClosedTabsCount(closedTabsRef.current.length);
+
+      const closedIds = new Set(toClose.map((t) => t.id));
+      setPageCache((prev) => {
+        const next = { ...prev };
+        for (const id of closedIds) delete next[id];
+        return next;
+      });
+      setTabZooms((prev) => {
+        const next = { ...prev };
+        for (const id of closedIds) delete next[id];
+        return next;
+      });
+      if (splitTabId && closedIds.has(splitTabId)) {
+        setSplitTabId(null);
+      }
+      if (pipTabId && closedIds.has(pipTabId)) {
+        setPipTabId(null);
+      }
+      setTabs((prev) => prev.filter((t) => !closedIds.has(t.id)));
+      if (closedIds.has(activeTabIdRef.current)) {
+        setActiveTabId(sourceId);
+        const kept = currentTabs.find((t) => t.id === sourceId);
+        if (kept && isRustNativeShell()) {
+          rustActivateTab(kept.id, kept.url, kept.isPrivate);
+        }
+      }
+    },
+    [activeWorkspace, pipTabId, splitTabId]
+  );
+
+  const handleToggleMuteTab = useCallback((tabId: string) => {
+    const target = tabsRef.current.find((t) => t.id === tabId);
+    if (!target) return;
+    const nextMuted = !target.muted;
+    setTabs((prev) =>
+      prev.map((t) => (t.id === tabId ? { ...t, muted: nextMuted } : t))
+    );
+    if (isRustNativeShell()) {
+      rustTabMute(tabId, nextMuted);
+    }
+  }, []);
+
+  const handleReorderTab = useCallback(
+    (draggedId: string, targetId: string, position: 'before' | 'after') => {
+      setTabs((prev) => reorderTabs(prev, draggedId, targetId, position));
+    },
+    []
+  );
+
+  const handleDetachTab = useCallback(
+    (tabId: string, point?: DetachDropPoint) => {
+      const currentTabs = tabsRef.current;
+      const tab = currentTabs.find((t) => t.id === tabId);
+      if (!tab) return;
+
+      if (isRustNativeShell()) {
+        rustDetachTabWindow(tab.url, {
+          x: point?.screenX,
+          y: point?.screenY,
+          isPrivate: tab.isPrivate,
+        });
+        rustCloseTab(tab.id);
+      } else {
+        const winWidth = Math.min(780, Math.max(480, window.innerWidth - 140));
+        const winHeight = Math.min(540, Math.max(360, window.innerHeight - 140));
+        const dropX = point ? point.x - Math.round(winWidth / 2) : Math.round((window.innerWidth - winWidth) / 2) + detachedWindows.length * 24;
+        const dropY = point ? Math.max(56, point.y - 16) : Math.round((window.innerHeight - winHeight) / 2) + detachedWindows.length * 24;
+        const clampedX = Math.max(16, Math.min(window.innerWidth - winWidth - 16, dropX));
+        const clampedY = Math.max(48, Math.min(window.innerHeight - winHeight - 16, dropY));
+        const windowId = `win-${detachedCounterRef.current++}`;
+        const zIndex = ++detachedZRef.current;
+        setDetachedWindows((prev) => [
+          ...prev,
+          {
+            windowId,
+            tab: { ...tab, pinned: false, hibernated: false, lastActiveAt: Date.now() },
+            x: clampedX,
+            y: clampedY,
+            width: winWidth,
+            height: winHeight,
+            maximized: false,
+            zIndex,
+          },
+        ]);
+      }
+
+      if (splitTabId === tabId) setSplitTabId(null);
+      if (pipTabId === tabId) setPipTabId(null);
+
+      const remaining = currentTabs.filter((t) => t.id !== tabId);
+      const wsRemaining = remaining.filter((t) => t.workspace === activeWorkspace);
+      setTabs(remaining);
+      if (wsRemaining.length === 0) {
+        setActiveTabId('');
+        if (isRustNativeShell()) {
+          sendToRust('set_active_url', { url: 'ferrox://speed-dial' });
+        }
+      } else if (tabId === activeTabIdRef.current) {
+        const fallback = wsRemaining[wsRemaining.length - 1];
+        setActiveTabId(fallback.id);
+        if (isRustNativeShell()) {
+          rustActivateTab(fallback.id, fallback.url, fallback.isPrivate);
+        }
+      }
+    },
+    [activeWorkspace, detachedWindows.length, pipTabId, splitTabId]
+  );
+
+  const handleOpenNewWindow = useCallback(
+    (url: string = 'ferrox://speed-dial', isPrivate: boolean = false) => {
+      if (isRustNativeShell()) {
+        rustOpenNewWindow(url, isPrivate);
+        return;
+      }
+      const tabId = `tab-${tabCounterRef.current++}`;
+      const newTab = createTab(tabId, activeWorkspace, url, Date.now(), { isPrivate });
+      const winWidth = Math.min(780, Math.max(480, window.innerWidth - 140));
+      const winHeight = Math.min(540, Math.max(360, window.innerHeight - 140));
+      const offset = detachedWindows.length * 24;
+      const windowId = `win-${detachedCounterRef.current++}`;
+      const zIndex = ++detachedZRef.current;
+      setDetachedWindows((prev) => [
+        ...prev,
+        {
+          windowId,
+          tab: newTab,
+          x: Math.max(24, Math.min(window.innerWidth - winWidth - 24, 96 + offset)),
+          y: Math.max(64, Math.min(window.innerHeight - winHeight - 24, 84 + offset)),
+          width: winWidth,
+          height: winHeight,
+          maximized: false,
+          zIndex,
+        },
+      ]);
+      if (!newTab.url.startsWith('ferrox://')) {
+        void fetchExternalUrl(tabId, newTab.url, { isPrivate });
+      }
+    },
+    [activeWorkspace, detachedWindows.length, fetchExternalUrl]
+  );
+
+  const handleFocusDetachedWindow = useCallback((windowId: string) => {
+    const nextZ = ++detachedZRef.current;
+    setDetachedWindows((prev) =>
+      prev.map((w) => (w.windowId === windowId ? { ...w, zIndex: nextZ } : w))
+    );
+  }, []);
+
+  const handleMoveDetachedWindow = useCallback((windowId: string, x: number, y: number) => {
+    setDetachedWindows((prev) =>
+      prev.map((w) => (w.windowId === windowId ? { ...w, x, y } : w))
+    );
+  }, []);
+
+  const handleResizeDetachedWindow = useCallback((windowId: string, width: number, height: number) => {
+    setDetachedWindows((prev) =>
+      prev.map((w) => (w.windowId === windowId ? { ...w, width, height } : w))
+    );
+  }, []);
+
+  const handleToggleMaximizeDetachedWindow = useCallback((windowId: string) => {
+    setDetachedWindows((prev) =>
+      prev.map((w) => (w.windowId === windowId ? { ...w, maximized: !w.maximized } : w))
+    );
+  }, []);
+
+  const handleDockDetachedWindow = useCallback(
+    (windowId: string) => {
+      const targetWin = detachedWindows.find((w) => w.windowId === windowId);
+      if (!targetWin) return;
+      const dockedTab: Tab = {
+        ...targetWin.tab,
+        workspace: activeWorkspace,
+        hibernated: false,
+        lastActiveAt: Date.now(),
+      };
+      setDetachedWindows((prev) => prev.filter((w) => w.windowId !== windowId));
+      setTabs((prev) => [...prev, dockedTab]);
+      setActiveTabId(dockedTab.id);
+    },
+    [activeWorkspace, detachedWindows]
+  );
+
+  const handleCloseDetachedWindow = useCallback((windowId: string) => {
+    const targetWin = detachedWindows.find((w) => w.windowId === windowId);
+    if (targetWin && !targetWin.tab.isPrivate) {
+      closedTabsRef.current = [...closedTabsRef.current.slice(-24), targetWin.tab];
+      setClosedTabsCount(closedTabsRef.current.length);
+    }
+    setDetachedWindows((prev) => prev.filter((w) => w.windowId !== windowId));
+  }, [detachedWindows]);
+
+  const handleNavigateDetachedWindow = useCallback(
+    (windowId: string, rawInput: string) => {
+      const targetWin = detachedWindows.find((w) => w.windowId === windowId);
+      if (!targetWin) return;
+      const normalized = normalizeAddressInput(rawInput, searchEngine);
+      const nextTab = tabHistoryNavigate(targetWin.tab, normalized);
+      setDetachedWindows((prev) =>
+        prev.map((w) => (w.windowId === windowId ? { ...w, tab: nextTab } : w))
+      );
+      if (!normalized.startsWith('ferrox://')) {
+        void fetchExternalUrl(nextTab.id, normalized, { isPrivate: nextTab.isPrivate });
+      }
+    },
+    [detachedWindows, fetchExternalUrl, searchEngine]
+  );
+
+  const handleDetachedBack = useCallback(
+    (windowId: string) => {
+      const targetWin = detachedWindows.find((w) => w.windowId === windowId);
+      if (!targetWin || !canGoBack(targetWin.tab)) return;
+      const nextTab = stepBack(targetWin.tab);
+      setDetachedWindows((prev) =>
+        prev.map((w) => (w.windowId === windowId ? { ...w, tab: nextTab } : w))
+      );
+      if (!nextTab.url.startsWith('ferrox://')) {
+        void fetchExternalUrl(nextTab.id, nextTab.url, { isPrivate: nextTab.isPrivate });
+      }
+    },
+    [detachedWindows, fetchExternalUrl]
+  );
+
+  const handleDetachedForward = useCallback(
+    (windowId: string) => {
+      const targetWin = detachedWindows.find((w) => w.windowId === windowId);
+      if (!targetWin || !canGoForward(targetWin.tab)) return;
+      const nextTab = stepForward(targetWin.tab);
+      setDetachedWindows((prev) =>
+        prev.map((w) => (w.windowId === windowId ? { ...w, tab: nextTab } : w))
+      );
+      if (!nextTab.url.startsWith('ferrox://')) {
+        void fetchExternalUrl(nextTab.id, nextTab.url, { isPrivate: nextTab.isPrivate });
+      }
+    },
+    [detachedWindows, fetchExternalUrl]
+  );
+
+  const handleDetachedReload = useCallback(
+    (windowId: string) => {
+      const targetWin = detachedWindows.find((w) => w.windowId === windowId);
+      if (!targetWin || targetWin.tab.url.startsWith('ferrox://')) return;
+      void fetchExternalUrl(targetWin.tab.id, targetWin.tab.url, {
+        isPrivate: targetWin.tab.isPrivate,
+        forceReload: true,
+      });
+    },
+    [detachedWindows, fetchExternalUrl]
+  );
+
   const handleSelectWorkspace = useCallback(
     (ws: WorkspaceId) => {
       setActiveWorkspace(ws);
@@ -1523,11 +1865,9 @@ export default function App() {
           void fetchExternalUrl(existing.id, existing.url, { isPrivate: existing.isPrivate });
         }
       } else {
-        const fresh = createTab(`tab-${tabCounterRef.current++}`, ws, 'ferrox://speed-dial');
-        setTabs((prev) => [...prev, fresh]);
-        setActiveTabId(fresh.id);
+        setActiveTabId('');
         if (isRustNativeShell()) {
-          rustActivateTab(fresh.id, fresh.url, false);
+          sendToRust('set_active_url', { url: 'ferrox://speed-dial' });
         }
       }
     },
@@ -1675,6 +2015,12 @@ export default function App() {
       case 'new_tab':
         handleNewTab('ferrox://speed-dial', false, false);
         break;
+      case 'new_window':
+        handleOpenNewWindow('ferrox://speed-dial', false);
+        break;
+      case 'new_private_tab':
+        handleNewTab('ferrox://speed-dial', true, false);
+        break;
       case 'close_tab':
         if (activeTab) handleCloseTab(activeTab.id);
         break;
@@ -1710,6 +2056,21 @@ export default function App() {
       case 'tab_search':
         setTabSearchOpen((open) => !open);
         break;
+      case 'bookmark_page':
+        handleToggleBookmark();
+        break;
+      case 'open_history':
+        handleOpenHubSection('history');
+        break;
+      case 'open_downloads':
+        handleOpenHubSection('downloads');
+        break;
+      case 'toggle_bookmarks_bar':
+        setShowBookmarksBar((b) => !b);
+        break;
+      case 'mute_tab':
+        if (activeTab) handleToggleMuteTab(activeTab.id);
+        break;
       case 'zoom_in':
         handleAdjustZoom('in');
         break;
@@ -1728,6 +2089,24 @@ export default function App() {
           void document.documentElement.requestFullscreen?.().catch(() => {});
         }
         break;
+      case 'tab_1':
+      case 'tab_2':
+      case 'tab_3':
+      case 'tab_4':
+      case 'tab_5':
+      case 'tab_6':
+      case 'tab_7':
+      case 'tab_8': {
+        const idx = Number(cmd.slice(4)) - 1;
+        const ordered = [...workspaceTabs].sort((a, b) => Number(b.pinned) - Number(a.pinned));
+        if (ordered[idx]) handleSelectTab(ordered[idx].id);
+        break;
+      }
+      case 'tab_last': {
+        const ordered = [...workspaceTabs].sort((a, b) => Number(b.pinned) - Number(a.pinned));
+        if (ordered.length > 0) handleSelectTab(ordered[ordered.length - 1].id);
+        break;
+      }
     }
   };
 
@@ -1936,7 +2315,11 @@ export default function App() {
           totalRamMb={rustTelemetry?.ramMb ?? budget.totalRamMb}
           blockedTotal={blockedEvents.length}
           detectedProfilesCount={detectedProfiles.length}
+          activeWorkspaceLabel={activeWorkspaceMeta.label}
+          workspaceTabCount={workspaceTabs.length}
           onNavigate={(u) => navigateTab(tab.id, u)}
+          onOpenBackgroundTab={handleOpenBackgroundTab}
+          onHoverUrl={setHoveredUrl}
           onAddBookmark={(title, rawUrl) => {
             const normalized = normalizeAddressInput(rawUrl, searchEngine);
             setBookmarks((prev) => [
@@ -1951,6 +2334,7 @@ export default function App() {
             ]);
           }}
           onOpenLimiter={() => setActiveDrawer('limiter')}
+          onOpenShield={() => setActiveDrawer('privacy')}
           onQuickSync={() => {
             if (isRustNativeShell() && detectedProfiles.length > 0) {
               handleSyncNativeProfile('all');
@@ -2006,7 +2390,7 @@ export default function App() {
             setAccent('crimson');
             setCustomAccentHex('#FA1E4E');
             setSurfaceTheme('obsidian');
-            setSearchEngine('duckduckgo');
+            setSearchEngine('google');
             setLimiter(DEFAULT_LIMITER_CONFIG);
             setBookmarks(DEFAULT_BOOKMARKS);
             setTrackerRules(DEFAULT_TRACKER_RULES);
@@ -2266,14 +2650,21 @@ export default function App() {
         tabGroups={tabGroups}
         activeTabId={activeTab?.id ?? null}
         splitTabId={splitTab?.id ?? null}
+        activeWorkspaceLabel={activeWorkspaceMeta.label}
         verticalTabs={verticalTabs}
         quickSettingsOpen={quickSettingsOpen}
+        canReopenClosedTab={closedTabsCount > 0}
         onSelectTab={handleSelectTab}
         onCloseTab={handleCloseTab}
         onDuplicateTab={handleDuplicateTab}
         onReloadTab={handleReloadTabById}
         onHibernateTab={handleHibernateTabById}
         onCloseOtherTabs={handleCloseOtherTabs}
+        onCloseTabsToRight={handleCloseTabsToRight}
+        onToggleMuteTab={handleToggleMuteTab}
+        onReorderTab={handleReorderTab}
+        onDetachTab={handleDetachTab}
+        onReopenClosedTab={handleReopenClosedTab}
         onNewTab={handleNewDefaultTab}
         onNewPrivateTab={handleNewPrivateTab}
         onTogglePin={handleTogglePin}
@@ -2283,6 +2674,8 @@ export default function App() {
         onToggleVerticalTabs={handleToggleVerticalTabs}
         onToggleQuickSettings={handleToggleQuickSettings}
         onContextMenuOpenChange={setTabContextMenuOpen}
+        onDragOverlayChange={setTabDragOverlayOpen}
+        onHoverUrl={setHoveredUrl}
       />
 
       <QuickSettingsPopover
@@ -2319,6 +2712,8 @@ export default function App() {
         pipActive={Boolean(pipTab)}
         shieldEnabled={shieldEnabled}
         vpnEnabled={privacyConfig.vpnEnabled}
+        vpnPingMs={currentVpnServer?.latencyMs}
+        vpnRegion={privacyConfig.vpnRegion}
         httpsOnly={privacyConfig.httpsOnly}
         upgradedFromHttp={activePageData?.upgradedFromHttp}
         insecureHttp={activePageData?.insecureHttpWarning}
@@ -2355,6 +2750,8 @@ export default function App() {
         <BookmarksBar
           bookmarks={bookmarks}
           onNavigate={handleOpenUrl}
+          onOpenBackgroundTab={handleOpenBackgroundTab}
+          onHoverUrl={setHoveredUrl}
           onUnpinFromBar={handleUnpinFromBar}
           onOpenManager={handleOpenBookmarksManager}
         />
@@ -2379,6 +2776,9 @@ export default function App() {
           activeDrawer={activeDrawer}
           activeUrl={activeTab?.url ?? ''}
           vpnEnabled={privacyConfig.vpnEnabled}
+          vpnPingMs={currentVpnServer?.latencyMs}
+          activeWorkspaceLabel={activeWorkspaceMeta.label}
+          activeWorkspaceTabCount={workspaceTabs.length}
           onToggleDrawer={handleToggleDrawer}
           onNavigateInternal={handleOpenUrl}
         />
@@ -2389,12 +2789,18 @@ export default function App() {
             tabGroups={tabGroups}
             activeTabId={activeTab?.id ?? null}
             splitTabId={splitTab?.id ?? null}
+            canReopenClosedTab={closedTabsCount > 0}
             onSelectTab={handleSelectTab}
             onCloseTab={handleCloseTab}
             onDuplicateTab={handleDuplicateTab}
             onReloadTab={handleReloadTabById}
             onHibernateTab={handleHibernateTabById}
             onCloseOtherTabs={handleCloseOtherTabs}
+            onCloseTabsToRight={handleCloseTabsToRight}
+            onToggleMuteTab={handleToggleMuteTab}
+            onReorderTab={handleReorderTab}
+            onDetachTab={handleDetachTab}
+            onReopenClosedTab={handleReopenClosedTab}
             onNewTab={handleNewDefaultTab}
             onNewPrivateTab={handleNewPrivateTab}
             onTogglePin={handleTogglePin}
@@ -2402,6 +2808,8 @@ export default function App() {
             onToggleGroupCollapse={handleToggleGroupCollapse}
             onOpenTabSearch={handleOpenTabSearch}
             onContextMenuOpenChange={setTabContextMenuOpen}
+            onDragOverlayChange={setTabDragOverlayOpen}
+            onHoverUrl={setHoveredUrl}
           />
         )}
 
@@ -2423,6 +2831,10 @@ export default function App() {
           trackerRules={trackerRules}
           blockedEvents={blockedEvents}
           privacyConfig={privacyConfig}
+          userGeo={userGeo}
+          vpnServers={vpnServers}
+          vpnPinging={vpnPinging}
+          onRefreshVpnPing={handleRefreshVpnPing}
           onClose={() => setActiveDrawer(null)}
           onUpdateLimiter={setLimiter}
           onTrimMemory={handleTrimMemory}
@@ -2510,6 +2922,45 @@ export default function App() {
           {activeTab && (activeTab.url.startsWith('ferrox://') || activeTab.hibernated) && (
             <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
               {renderTabContent(activeTab, false)}
+            </div>
+          )}
+
+          {/* Render Speed Dial cockpit cleanly when active workspace has 0 tabs open */}
+          {!activeTab && (
+            <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
+              <SpeedDialView
+                bookmarks={bookmarks}
+                limiter={limiter}
+                totalRamMb={rustTelemetry?.ramMb ?? budget.totalRamMb}
+                blockedTotal={blockedEvents.length}
+                detectedProfilesCount={detectedProfiles.length}
+                activeWorkspaceLabel={activeWorkspaceMeta.label}
+                workspaceTabCount={0}
+                onNavigate={handleOpenUrl}
+                onOpenBackgroundTab={handleOpenBackgroundTab}
+                onHoverUrl={setHoveredUrl}
+                onAddBookmark={(title, rawUrl) => {
+                  const normalized = normalizeAddressInput(rawUrl, searchEngine);
+                  setBookmarks((prev) => [
+                    ...prev,
+                    {
+                      id: `bm-${Date.now()}`,
+                      title,
+                      url: normalized,
+                      category: 'Custom',
+                      pinnedToBar: true,
+                    },
+                  ]);
+                }}
+                onOpenLimiter={() => setActiveDrawer('limiter')}
+                onOpenShield={() => setActiveDrawer('privacy')}
+                onQuickSync={() => {
+                  if (isRustNativeShell() && detectedProfiles.length > 0) {
+                    handleSyncNativeProfile('all');
+                  }
+                  handleOpenUrl('ferrox://settings');
+                }}
+              />
             </div>
           )}
 
@@ -2622,6 +3073,69 @@ export default function App() {
         onRestoreTab={(id) => handleSelectTab(id)}
         onClose={() => setPipTabId(null)}
       />
+
+      {/* Detached Browser Windows (dragged out from tab strip or Ctrl+N) */}
+      {detachedWindows.map((win) => (
+        <DetachedWindow
+          key={win.windowId}
+          win={win}
+          canBack={canGoBack(win.tab)}
+          canForward={canGoForward(win.tab)}
+          isLoading={Boolean(loadingTabs[win.tab.id])}
+          onFocus={handleFocusDetachedWindow}
+          onMove={handleMoveDetachedWindow}
+          onResize={handleResizeDetachedWindow}
+          onToggleMaximize={handleToggleMaximizeDetachedWindow}
+          onDockBack={handleDockDetachedWindow}
+          onClose={handleCloseDetachedWindow}
+          onNavigate={handleNavigateDetachedWindow}
+          onBack={handleDetachedBack}
+          onForward={handleDetachedForward}
+          onReload={handleDetachedReload}
+        >
+          {win.tab.url === 'ferrox://speed-dial' ? (
+            <SpeedDialView
+              bookmarks={bookmarks}
+              limiter={limiter}
+              totalRamMb={rustTelemetry?.ramMb ?? budget.totalRamMb}
+              blockedTotal={blockedEvents.length}
+              detectedProfilesCount={detectedProfiles.length}
+              activeWorkspaceLabel="New Window"
+              workspaceTabCount={1}
+              onNavigate={(u) => handleNavigateDetachedWindow(win.windowId, u)}
+              onOpenBackgroundTab={handleOpenBackgroundTab}
+              onHoverUrl={setHoveredUrl}
+              onAddBookmark={(title, rawUrl) => {
+                const normalized = normalizeAddressInput(rawUrl, searchEngine);
+                setBookmarks((prev) => [
+                  ...prev,
+                  {
+                    id: `bm-${Date.now()}`,
+                    title,
+                    url: normalized,
+                    category: 'Custom',
+                    pinnedToBar: true,
+                  },
+                ]);
+              }}
+              onOpenLimiter={() => setActiveDrawer('limiter')}
+              onOpenShield={() => setActiveDrawer('privacy')}
+            />
+          ) : (
+            renderTabContent(win.tab, false)
+          )}
+        </DetachedWindow>
+      ))}
+
+      {/* Classic Browser Hover URL Status Bar Pill */}
+      {hoveredUrl && (
+        <div
+          aria-live="off"
+          className="fixed left-14 bottom-2 z-40 max-w-[460px] px-2.5 py-1 rounded-md border border-white/12 bg-[#0E1118]/92 backdrop-blur-md text-[11px] font-mono-tabular text-slate-300 truncate pointer-events-none shadow-lg"
+        >
+          {hoveredUrl}
+        </div>
+      )}
     </div>
   );
 }

@@ -133,6 +133,7 @@ export interface Tab {
   historyIndex: number;
   pinned: boolean;
   hibernated: boolean;
+  muted?: boolean;
   isPrivate: boolean;
   estimatedRamMb: number;
   estimatedCpuPercent: number;
@@ -253,18 +254,198 @@ export type VpnProtocolId = 'wireguard' | 'openvpn';
 export interface VpnServerMeta {
   region: string;
   label: string;
+  countryCode: string;
   virtualIp: string;
+  lat: number;
+  lon: number;
   latencyMs: number;
   loadPercent: number;
 }
 
+export interface UserGeoLocation {
+  label: string;
+  timeZone: string;
+  lat: number;
+  lon: number;
+}
+
+export interface VpnServerWithPing extends VpnServerMeta {
+  distanceKm: number;
+  isFastest: boolean;
+}
+
 export const VPN_SERVERS: VpnServerMeta[] = [
-  { region: 'US East', label: 'New York, US', virtualIp: '198.51.100.42', latencyMs: 18, loadPercent: 24 },
-  { region: 'EU Central', label: 'Frankfurt, DE', virtualIp: '203.0.113.88', latencyMs: 36, loadPercent: 31 },
-  { region: 'Zurich', label: 'Zurich, CH', virtualIp: '192.0.2.119', latencyMs: 41, loadPercent: 19 },
-  { region: 'Tokyo', label: 'Tokyo, JP', virtualIp: '198.51.100.204', latencyMs: 84, loadPercent: 27 },
-  { region: 'Singapore', label: 'Singapore, SG', virtualIp: '203.0.113.151', latencyMs: 92, loadPercent: 22 },
+  { region: 'US West', label: 'Los Angeles, US', countryCode: 'US', virtualIp: '198.51.100.14', lat: 34.05, lon: -118.24, latencyMs: 14, loadPercent: 21 },
+  { region: 'US East', label: 'New York, US', countryCode: 'US', virtualIp: '198.51.100.42', lat: 40.71, lon: -74.01, latencyMs: 18, loadPercent: 24 },
+  { region: 'UK', label: 'London, GB', countryCode: 'GB', virtualIp: '203.0.113.44', lat: 51.51, lon: -0.13, latencyMs: 28, loadPercent: 29 },
+  { region: 'EU Central', label: 'Frankfurt, DE', countryCode: 'DE', virtualIp: '203.0.113.88', lat: 50.11, lon: 8.68, latencyMs: 36, loadPercent: 31 },
+  { region: 'Zurich', label: 'Zurich, CH', countryCode: 'CH', virtualIp: '192.0.2.119', lat: 47.37, lon: 8.54, latencyMs: 41, loadPercent: 19 },
+  { region: 'Tokyo', label: 'Tokyo, JP', countryCode: 'JP', virtualIp: '198.51.100.204', lat: 35.68, lon: 139.69, latencyMs: 84, loadPercent: 27 },
+  { region: 'Singapore', label: 'Singapore, SG', countryCode: 'SG', virtualIp: '203.0.113.151', lat: 1.35, lon: 103.82, latencyMs: 92, loadPercent: 22 },
+  { region: 'Sydney', label: 'Sydney, AU', countryCode: 'AU', virtualIp: '192.0.2.210', lat: -33.87, lon: 151.21, latencyMs: 118, loadPercent: 18 },
 ];
+
+const TIMEZONE_COORDS: Record<string, { label: string; lat: number; lon: number }> = {
+  'America/Los_Angeles': { label: 'Los Angeles, US', lat: 34.05, lon: -118.24 },
+  'America/Vancouver': { label: 'Vancouver, CA', lat: 49.28, lon: -123.12 },
+  'America/Phoenix': { label: 'Phoenix, US', lat: 33.45, lon: -112.07 },
+  'America/Denver': { label: 'Denver, US', lat: 39.74, lon: -104.99 },
+  'America/Chicago': { label: 'Chicago, US', lat: 41.88, lon: -87.63 },
+  'America/Mexico_City': { label: 'Mexico City, MX', lat: 19.43, lon: -99.13 },
+  'America/New_York': { label: 'New York, US', lat: 40.71, lon: -74.01 },
+  'America/Toronto': { label: 'Toronto, CA', lat: 43.65, lon: -79.38 },
+  'America/Sao_Paulo': { label: 'São Paulo, BR', lat: -23.55, lon: -46.63 },
+  'America/Buenos_Aires': { label: 'Buenos Aires, AR', lat: -34.6, lon: -58.38 },
+  'America/Argentina/Buenos_Aires': { label: 'Buenos Aires, AR', lat: -34.6, lon: -58.38 },
+  'America/Bogota': { label: 'Bogotá, CO', lat: 4.71, lon: -74.07 },
+  'America/Lima': { label: 'Lima, PE', lat: -12.05, lon: -77.04 },
+  'America/Anchorage': { label: 'Anchorage, US', lat: 61.22, lon: -149.9 },
+  'Pacific/Honolulu': { label: 'Honolulu, US', lat: 21.31, lon: -157.86 },
+  'Europe/London': { label: 'London, GB', lat: 51.51, lon: -0.13 },
+  'Europe/Dublin': { label: 'Dublin, IE', lat: 53.35, lon: -6.26 },
+  'Europe/Lisbon': { label: 'Lisbon, PT', lat: 38.72, lon: -9.14 },
+  'Europe/Madrid': { label: 'Madrid, ES', lat: 40.42, lon: -3.7 },
+  'Europe/Paris': { label: 'Paris, FR', lat: 48.86, lon: 2.35 },
+  'Europe/Amsterdam': { label: 'Amsterdam, NL', lat: 52.37, lon: 4.9 },
+  'Europe/Brussels': { label: 'Brussels, BE', lat: 50.85, lon: 4.35 },
+  'Europe/Berlin': { label: 'Berlin, DE', lat: 52.52, lon: 13.41 },
+  'Europe/Zurich': { label: 'Zurich, CH', lat: 47.37, lon: 8.54 },
+  'Europe/Vienna': { label: 'Vienna, AT', lat: 48.21, lon: 16.37 },
+  'Europe/Rome': { label: 'Rome, IT', lat: 41.9, lon: 12.5 },
+  'Europe/Warsaw': { label: 'Warsaw, PL', lat: 52.23, lon: 21.01 },
+  'Europe/Stockholm': { label: 'Stockholm, SE', lat: 59.33, lon: 18.07 },
+  'Europe/Oslo': { label: 'Oslo, NO', lat: 59.91, lon: 10.75 },
+  'Europe/Helsinki': { label: 'Helsinki, FI', lat: 60.17, lon: 24.94 },
+  'Europe/Athens': { label: 'Athens, GR', lat: 37.98, lon: 23.73 },
+  'Europe/Istanbul': { label: 'Istanbul, TR', lat: 41.01, lon: 28.98 },
+  'Europe/Moscow': { label: 'Moscow, RU', lat: 55.76, lon: 37.62 },
+  'Africa/Johannesburg': { label: 'Johannesburg, ZA', lat: -26.2, lon: 28.05 },
+  'Africa/Cairo': { label: 'Cairo, EG', lat: 30.04, lon: 31.24 },
+  'Asia/Dubai': { label: 'Dubai, AE', lat: 25.2, lon: 55.27 },
+  'Asia/Kolkata': { label: 'Mumbai, IN', lat: 19.08, lon: 72.88 },
+  'Asia/Calcutta': { label: 'Mumbai, IN', lat: 19.08, lon: 72.88 },
+  'Asia/Bangkok': { label: 'Bangkok, TH', lat: 13.76, lon: 100.5 },
+  'Asia/Jakarta': { label: 'Jakarta, ID', lat: -6.21, lon: 106.85 },
+  'Asia/Singapore': { label: 'Singapore, SG', lat: 1.35, lon: 103.82 },
+  'Asia/Kuala_Lumpur': { label: 'Kuala Lumpur, MY', lat: 3.14, lon: 101.69 },
+  'Asia/Manila': { label: 'Manila, PH', lat: 14.6, lon: 120.98 },
+  'Asia/Hong_Kong': { label: 'Hong Kong, HK', lat: 22.32, lon: 114.17 },
+  'Asia/Taipei': { label: 'Taipei, TW', lat: 25.03, lon: 121.57 },
+  'Asia/Shanghai': { label: 'Shanghai, CN', lat: 31.23, lon: 121.47 },
+  'Asia/Seoul': { label: 'Seoul, KR', lat: 37.57, lon: 126.98 },
+  'Asia/Tokyo': { label: 'Tokyo, JP', lat: 35.68, lon: 139.69 },
+  'Australia/Perth': { label: 'Perth, AU', lat: -31.95, lon: 115.86 },
+  'Australia/Melbourne': { label: 'Melbourne, AU', lat: -37.81, lon: 144.96 },
+  'Australia/Sydney': { label: 'Sydney, AU', lat: -33.87, lon: 151.21 },
+  'Pacific/Auckland': { label: 'Auckland, NZ', lat: -36.85, lon: 174.76 },
+};
+
+export function detectUserGeoFromTimezone(
+  timeZone?: string,
+  tzOffsetMinutes?: number
+): UserGeoLocation {
+  const resolvedTz =
+    timeZone ??
+    (typeof Intl !== 'undefined'
+      ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+      : 'UTC');
+
+  const direct = TIMEZONE_COORDS[resolvedTz];
+  if (direct) {
+    return {
+      label: direct.label,
+      timeZone: resolvedTz,
+      lat: direct.lat,
+      lon: direct.lon,
+    };
+  }
+
+  const offsetMin =
+    typeof tzOffsetMinutes === 'number' ? tzOffsetMinutes : new Date().getTimezoneOffset();
+  const utcHours = -offsetMin / 60;
+  const approxLon = Math.max(-180, Math.min(180, utcHours * 15));
+  const approxLat = resolvedTz.startsWith('Australia/') || resolvedTz.startsWith('Pacific/Auckland')
+    ? -33
+    : resolvedTz.startsWith('Europe/')
+    ? 49
+    : resolvedTz.startsWith('Asia/')
+    ? 30
+    : 38;
+  const cityPart = resolvedTz.includes('/')
+    ? resolvedTz.split('/').pop()!.replace(/_/g, ' ')
+    : `UTC${utcHours >= 0 ? '+' : ''}${utcHours}`;
+
+  return {
+    label: cityPart,
+    timeZone: resolvedTz,
+    lat: approxLat,
+    lon: approxLon,
+  };
+}
+
+export function haversineDistanceKm(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(R * c);
+}
+
+export function estimateVpnLatencyMs(
+  server: VpnServerMeta,
+  userGeo: UserGeoLocation,
+  protocol: VpnProtocolId = 'wireguard',
+  jitterOffsetMs: number = 0
+): { pingMs: number; distanceKm: number } {
+  const distanceKm = haversineDistanceKm(userGeo.lat, userGeo.lon, server.lat, server.lon);
+  // Real-world fiber-optic RTT: ~200 km/ms propagation one-way -> ~100 km/ms RTT, plus routing factor (~1.18x)
+  const fiberRttMs = (distanceKm / 100) * 1.15;
+  const protocolOverheadMs = protocol === 'openvpn' ? 24 : 11;
+  const loadOverheadMs = Math.round((server.loadPercent / 100) * 6);
+  const pingMs = Math.max(
+    8,
+    Math.round(fiberRttMs + protocolOverheadMs + loadOverheadMs + jitterOffsetMs)
+  );
+  return { pingMs, distanceKm };
+}
+
+export function getVpnServersWithLocationPing(
+  userGeo: UserGeoLocation,
+  protocol: VpnProtocolId = 'wireguard',
+  jitterMap?: Record<string, number>
+): VpnServerWithPing[] {
+  const computed = VPN_SERVERS.map((srv) => {
+    const jitter = jitterMap?.[srv.region] ?? 0;
+    const { pingMs, distanceKm } = estimateVpnLatencyMs(srv, userGeo, protocol, jitter);
+    return {
+      ...srv,
+      latencyMs: pingMs,
+      distanceKm,
+      isFastest: false,
+    };
+  });
+  let minPing = Infinity;
+  let minIdx = 0;
+  for (let i = 0; i < computed.length; i++) {
+    if (computed[i].latencyMs < minPing) {
+      minPing = computed[i].latencyMs;
+      minIdx = i;
+    }
+  }
+  if (computed[minIdx]) {
+    computed[minIdx].isFastest = true;
+  }
+  return computed;
+}
 
 export interface PrivacySecurityConfig {
   httpsOnly: boolean;
@@ -357,15 +538,55 @@ export const DEFAULT_EXTENSIONS: BrowserExtension[] = [
 ];
 
 export const DEFAULT_BOOKMARKS: BookmarkItem[] = [
-  { id: 'bm-rust', title: 'Rust Language', url: 'https://www.rust-lang.org', category: 'Development', pinnedToBar: true },
-  { id: 'bm-docsrs', title: 'Docs.rs', url: 'https://docs.rs', category: 'Development', pinnedToBar: true },
-  { id: 'bm-crates', title: 'Crates.io', url: 'https://crates.io', category: 'Development', pinnedToBar: true },
+  { id: 'bm-google', title: 'Google', url: 'https://www.google.com', category: 'General', pinnedToBar: true },
+  { id: 'bm-youtube', title: 'YouTube', url: 'https://www.youtube.com', category: 'Media', pinnedToBar: true },
   { id: 'bm-wiki', title: 'Wikipedia', url: 'https://en.wikipedia.org', category: 'Reference', pinnedToBar: true },
-  { id: 'bm-example', title: 'Example Domain', url: 'https://example.com', category: 'Sandbox', pinnedToBar: false },
-  { id: 'bm-source', title: 'Rust Crate Source', url: 'ferrox://rust-source', category: 'FerroX', pinnedToBar: true },
 ];
 
+const LEGACY_DEFAULT_BOOKMARK_IDS = new Set([
+  'bm-rust',
+  'bm-docsrs',
+  'bm-crates',
+  'bm-wiki',
+  'bm-example',
+  'bm-source',
+]);
+
+const LEGACY_DEFAULT_BOOKMARK_URLS = new Set([
+  'https://www.rust-lang.org',
+  'https://docs.rs',
+  'https://crates.io',
+  'https://en.wikipedia.org',
+  'https://example.com',
+  'ferrox://rust-source',
+]);
+
+export function migrateLegacyBookmarks(saved?: BookmarkItem[]): BookmarkItem[] {
+  if (!Array.isArray(saved)) {
+    return DEFAULT_BOOKMARKS;
+  }
+  if (saved.length === 0) {
+    return [];
+  }
+  const hasLegacyRustSeed = saved.some(
+    (b) =>
+      b.id === 'bm-rust' ||
+      b.id === 'bm-crates' ||
+      b.url === 'https://www.rust-lang.org' ||
+      b.url === 'https://crates.io' ||
+      b.url === 'ferrox://rust-source'
+  );
+  const allAreLegacyDefaults = saved.every(
+    (b) => LEGACY_DEFAULT_BOOKMARK_IDS.has(b.id) || LEGACY_DEFAULT_BOOKMARK_URLS.has(b.url)
+  );
+  if (hasLegacyRustSeed && allAreLegacyDefaults) {
+    return DEFAULT_BOOKMARKS;
+  }
+  return saved;
+}
+
 export const DEFAULT_TRACKER_RULES: string[] = [
+  // Google & YouTube ad networks
   'doubleclick.net',
   'googlesyndication.com',
   'googleadservices.com',
@@ -373,13 +594,174 @@ export const DEFAULT_TRACKER_RULES: string[] = [
   'googletagmanager.com',
   'adservice.google.com',
   'pagead2.googlesyndication.com',
+  'tpc.googlesyndication.com',
   'static.doubleclick.net',
+  'googleads.g.doubleclick.net',
+  'securepubads.g.doubleclick.net',
+  'adclick.g.doubleclick.net',
+  'imasdk.googleapis.com',
+  '2mdn.net',
+  'fundingchoicesmessages.google.com',
+  // Programmatic exchanges & header bidding
+  'adnxs.com',
+  'pubmatic.com',
+  'rubiconproject.com',
+  'openx.net',
+  'casalemedia.com',
+  'indexww.com',
+  'criteo.com',
+  'criteo.net',
+  'amazon-adsystem.com',
+  'aax.amazon-adsystem.com',
+  'adsrvr.org',
+  'bidswitch.net',
+  'smartadserver.com',
+  '3lift.com',
+  'triplelift.com',
+  'sharethrough.com',
+  'lijit.com',
+  'yieldmo.com',
+  'gumgum.com',
+  'teads.tv',
+  'spotxchange.com',
+  'spotx.tv',
+  'springserve.com',
+  'contextweb.com',
+  'media.net',
+  'adform.net',
+  'adroll.com',
+  'turn.com',
+  'mathtag.com',
+  'rlcdn.com',
+  'id5-sync.com',
+  'crwdcntrl.net',
+  'bluekai.com',
+  'demdex.net',
+  'krxd.net',
+  'eyeota.net',
+  'tapad.com',
+  'agkn.com',
+  'permutive.com',
+  'btloader.com',
+  'connatix.com',
+  'primis.tech',
+  'vidazoo.com',
+  'aniview.com',
+  'vidoomy.com',
+  'rhythmone.com',
+  'undertone.com',
+  'kargo.com',
+  'sonobi.com',
+  'emxdgt.com',
+  '1rx.io',
+  '33across.com',
+  'stickyadstv.com',
+  'inmobi.com',
+  'unityads.unity3d.com',
+  'applovin.com',
+  'vungle.com',
+  'ironsrc.com',
+  'chartboost.com',
+  // Publisher ad managers (news, blogs, wikis, gaming)
+  'mediavine.com',
+  'adthrive.com',
+  'cafemedia.com',
+  'ezoic.net',
+  'ezojs.com',
+  'ezodn.com',
+  'freestar.io',
+  'playwire.com',
+  'snigelweb.com',
+  'nitropay.com',
+  'buysellads.com',
+  'carbonads.com',
+  'carbonads.net',
+  'proper.io',
+  'adpushup.com',
+  'setupad.com',
+  'vlitag.com',
+  'ay.delivery',
+  'htlbid.com',
+  // Native & recommendation widgets
+  'taboola.com',
+  'outbrain.com',
+  'mgid.com',
+  'revcontent.com',
+  'ntv.io',
+  'dianomi.com',
+  'zergnet.com',
+  'content.ad',
+  'adblade.com',
+  'zemanta.com',
+  'ligatus.com',
+  'plista.com',
+  // Popunder & aggressive ad networks
+  'popads.net',
+  'popcash.net',
+  'propellerads.com',
+  'onclickalgo.com',
+  'monetag.com',
+  'exoclick.com',
+  'trafficjunky.net',
+  'trafficstars.com',
+  'juicyads.com',
+  'adsterra.com',
+  'hilltopads.net',
+  'clickadu.com',
+  'richpush.co',
+  'admaven.com',
+  'acscdn.com',
+  'highperformanceformat.com',
+  'profitablegatecpm.com',
+  'topcreativeformat.com',
+  // Social & platform ad/tracking pixels
   'connect.facebook.net',
+  'ads.twitter.com',
+  'ads-api.twitter.com',
+  'analytics.twitter.com',
+  'static.ads-twitter.com',
+  'bat.bing.com',
+  'ads.microsoft.com',
+  'advertising.com',
+  'ads.yahoo.com',
+  'adtech.de',
+  'analytics.tiktok.com',
+  'sc-static.net',
+  'tr.snapchat.com',
+  'px.ads.linkedin.com',
+  'snap.licdn.com',
+  'ct.pinterest.com',
+  'alb.reddit.com',
+  'events.redditmedia.com',
+  'fls-na.amazon.com',
+  'mads.amazon.com',
+  // Analytics, session replay & ad verification
   'scorecardresearch.com',
+  'quantserve.com',
   'mixpanel.com',
   'hotjar.com',
   'segment.io',
-  'ads.twitter.com',
+  'fullstory.com',
+  'crazyegg.com',
+  'mouseflow.com',
+  'luckyorange.com',
+  'inspectlet.com',
+  'chartbeat.com',
+  'chartbeat.net',
+  'omtrdc.net',
+  '2o7.net',
+  'moatads.com',
+  'doubleverify.com',
+  'adsafeprotected.com',
+  'integralads.com',
+  'bam.nr-data.net',
+  'clarity.ms',
+  'amplitude.com',
+  'heapanalytics.com',
+  'kissmetrics.com',
+  'adjust.com',
+  'appsflyer.com',
+  // Cryptominers
   'coinhive.com',
   'coin-hive.com',
   'cryptoloot.pro',
@@ -387,7 +769,22 @@ export const DEFAULT_TRACKER_RULES: string[] = [
   'webminepool.com',
   'minero.cc',
   'jsecoin.com',
+  'authedmine.com',
+  'monerominer.rocks',
+  'coinimp.com',
 ];
+
+export function mergeDefaultTrackerRules(savedRules?: string[]): string[] {
+  if (!Array.isArray(savedRules) || savedRules.length === 0) {
+    return DEFAULT_TRACKER_RULES;
+  }
+  const seen = new Set<string>(DEFAULT_TRACKER_RULES);
+  for (const r of savedRules) {
+    const clean = String(r).trim().toLowerCase();
+    if (clean) seen.add(clean);
+  }
+  return Array.from(seen);
+}
 
 export const PHISHING_BLOCKLIST: string[] = [
   'malware.testing.google.test',
@@ -456,10 +853,11 @@ export function stripTrackingQueryParams(rawUrl: string): {
   }
 }
 
-export type SearchEngineId = 'duckduckgo' | 'wikipedia' | 'crates';
+export type SearchEngineId = 'google' | 'duckduckgo' | 'wikipedia' | 'crates';
 
 export const SEARCH_ENGINES: Record<SearchEngineId, { label: string; prefix: string }> = {
-  duckduckgo: { label: 'DuckDuckGo HTML', prefix: 'https://html.duckduckgo.com/html/?q=' },
+  google: { label: 'Google', prefix: 'https://www.google.com/search?q=' },
+  duckduckgo: { label: 'DuckDuckGo', prefix: 'https://html.duckduckgo.com/html/?q=' },
   wikipedia: { label: 'Wikipedia', prefix: 'https://en.wikipedia.org/w/index.php?search=' },
   crates: { label: 'Crates.io', prefix: 'https://crates.io/search?q=' },
 };
@@ -474,7 +872,7 @@ export const INTERNAL_PAGES: Record<string, string> = {
 
 export function normalizeAddressInput(
   rawInput: string,
-  searchEngine: SearchEngineId = 'duckduckgo'
+  searchEngine: SearchEngineId = 'google'
 ): string {
   const trimmed = rawInput.trim();
   if (!trimmed) {
@@ -498,7 +896,7 @@ export function normalizeAddressInput(
       // Fallback to search below
     }
   }
-  const engine = SEARCH_ENGINES[searchEngine] ?? SEARCH_ENGINES.duckduckgo;
+  const engine = SEARCH_ENGINES[searchEngine] ?? SEARCH_ENGINES.google;
   return `${engine.prefix}${encodeURIComponent(trimmed)}`;
 }
 
@@ -724,6 +1122,7 @@ export function createTab(
     historyIndex: 0,
     pinned: false,
     hibernated: false,
+    muted: false,
     isPrivate: Boolean(options?.isPrivate),
     estimatedRamMb: estimateTabMemoryMb(normalized, false),
     estimatedCpuPercent: estimateTabCpuPercent(normalized, false, true),
@@ -738,10 +1137,46 @@ export function duplicateTab(source: Tab, newId: string, now: number = Date.now(
     history: [...source.history],
     pinned: false,
     hibernated: false,
+    muted: Boolean(source.muted),
     estimatedRamMb: estimateTabMemoryMb(source.url, false),
     estimatedCpuPercent: estimateTabCpuPercent(source.url, false, true),
     lastActiveAt: now,
   };
+}
+
+export function reorderTabs(
+  tabs: Tab[],
+  draggedId: string,
+  targetId: string,
+  position: 'before' | 'after' = 'before'
+): Tab[] {
+  if (draggedId === targetId) return tabs;
+  const fromIdx = tabs.findIndex((t) => t.id === draggedId);
+  const targetTab = tabs.find((t) => t.id === targetId);
+  if (fromIdx === -1 || !targetTab) return tabs;
+
+  const dragged = tabs[fromIdx];
+  // Keep pinned tabs within pinned region and unpinned within unpinned region
+  if (dragged.pinned !== targetTab.pinned || dragged.workspace !== targetTab.workspace) {
+    return tabs;
+  }
+
+  const withoutDragged = tabs.filter((t) => t.id !== draggedId);
+  const newTargetIdx = withoutDragged.findIndex((t) => t.id === targetId);
+  if (newTargetIdx === -1) return tabs;
+  const insertAt = position === 'after' ? newTargetIdx + 1 : newTargetIdx;
+  const next = [...withoutDragged];
+  next.splice(insertAt, 0, dragged);
+  return next;
+}
+
+export function getTabsToRight(tabs: Tab[], workspace: WorkspaceId, sourceId: string): Tab[] {
+  const wsOrdered = [...tabs.filter((t) => t.workspace === workspace)].sort(
+    (a, b) => Number(b.pinned) - Number(a.pinned)
+  );
+  const idx = wsOrdered.findIndex((t) => t.id === sourceId);
+  if (idx === -1) return [];
+  return wsOrdered.slice(idx + 1).filter((t) => !t.pinned);
 }
 
 export function canGoBack(tab: Tab): boolean {

@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(target_os = "windows")]
 use tao::platform::windows::WindowBuilderExtWindows;
 use tao::{
-    dpi::LogicalSize as TaoLogicalSize,
+    dpi::{LogicalPosition as TaoLogicalPosition, LogicalSize as TaoLogicalSize},
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy},
     window::{Fullscreen, Icon, Theme as WindowTheme, Window, WindowBuilder},
@@ -194,15 +194,24 @@ const CONTENT_TAB_INIT_SCRIPT: &str = r#"
       } else if (mod && !ev.altKey) {
         if (key === 't' && ev.shiftKey) cmd = 'reopen_tab';
         else if (key === 't' && !ev.shiftKey) cmd = 'new_tab';
+        else if (key === 'n' && ev.shiftKey) cmd = 'new_private_tab';
+        else if (key === 'n' && !ev.shiftKey) cmd = 'new_window';
         else if (key === 'w' && !ev.shiftKey) cmd = 'close_tab';
         else if (ev.key === 'Tab' && ev.shiftKey) cmd = 'prev_tab';
         else if (ev.key === 'Tab' && !ev.shiftKey) cmd = 'next_tab';
         else if (key === 'l') cmd = 'focus_omnibox';
         else if (key === 'f') cmd = 'find_in_page';
         else if (key === 'k') cmd = 'tab_search';
+        else if (key === 'd' && !ev.shiftKey) cmd = 'bookmark_page';
+        else if (key === 'h' && !ev.shiftKey) cmd = 'open_history';
+        else if (key === 'j' && !ev.shiftKey) cmd = 'open_downloads';
+        else if (key === 'b' && ev.shiftKey) cmd = 'toggle_bookmarks_bar';
+        else if (key === 'm' && !ev.shiftKey) cmd = 'mute_tab';
         else if (key === '=' || key === '+') cmd = 'zoom_in';
         else if (key === '-') cmd = 'zoom_out';
         else if (key === '0') cmd = 'zoom_reset';
+        else if (!ev.shiftKey && key >= '1' && key <= '8') cmd = 'tab_' + key;
+        else if (!ev.shiftKey && key === '9') cmd = 'tab_last';
       }
 
       if (cmd) {
@@ -381,6 +390,8 @@ struct UiSyncPayload {
     vpn_region: String,
     vault_count: usize,
     auto_sync_browsers: bool,
+    initial_url: Option<String>,
+    initial_private: bool,
 }
 
 #[derive(Serialize)]
@@ -415,6 +426,66 @@ struct AppState {
     tab_zooms: HashMap<String, f64>,
     last_telemetry_sent: Option<(u64, i32, usize)>,
     last_trim_at: Option<Instant>,
+    initial_url: Option<String>,
+    initial_private: bool,
+}
+
+#[derive(Debug, Default)]
+struct LaunchArgs {
+    url: Option<String>,
+    x: Option<f64>,
+    y: Option<f64>,
+    is_private: bool,
+}
+
+fn parse_launch_args() -> LaunchArgs {
+    let mut parsed = LaunchArgs::default();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--url" => {
+                if let Some(val) = args.next() {
+                    if !val.trim().is_empty() {
+                        parsed.url = Some(val);
+                    }
+                }
+            }
+            "--x" => {
+                if let Some(val) = args.next() {
+                    parsed.x = val.parse::<f64>().ok();
+                }
+            }
+            "--y" => {
+                if let Some(val) = args.next() {
+                    parsed.y = val.parse::<f64>().ok();
+                }
+            }
+            "--private" => {
+                parsed.is_private = true;
+            }
+            _ => {}
+        }
+    }
+    parsed
+}
+
+fn spawn_ferrox_window(url: &str, x: Option<f64>, y: Option<f64>, is_private: bool) {
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cmd = Command::new(exe);
+        if !url.trim().is_empty() {
+            cmd.arg("--url").arg(url);
+        }
+        if let Some(px) = x {
+            cmd.arg("--x").arg(format!("{}", px.round() as i32));
+        }
+        if let Some(py) = y {
+            cmd.arg("--y").arg(format!("{}", py.round() as i32));
+        }
+        if is_private {
+            cmd.arg("--private");
+        }
+        let _ = cmd.spawn();
+    }
 }
 
 fn workspace_slug(ws: WorkspaceId) -> &'static str {
@@ -850,6 +921,8 @@ fn sync_views(
         vpn_region: state.core.config.vpn_region.clone(),
         vault_count: state.vault.entries().len(),
         auto_sync_browsers: state.core.config.auto_sync_browsers,
+        initial_url: state.initial_url.clone(),
+        initial_private: state.initial_private,
     };
 
     if let Ok(json) = serde_json::to_string(&payload) {
@@ -929,6 +1002,7 @@ fn notify_tab_hibernated(chrome: &WebView, tab_id: &str) {
 fn main() {
     env_logger::init();
 
+    let launch_args = parse_launch_args();
     let config = BrowserConfig::load_or_default();
     let webview2_args = build_webview2_args(&config);
     std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", webview2_args);
@@ -948,11 +1022,15 @@ fn main() {
     let proxy = event_loop.create_proxy();
 
     let app_icon = load_app_icon();
-    let window_builder = WindowBuilder::new()
+    let mut window_builder = WindowBuilder::new()
         .with_title("FerroX Browser")
         .with_inner_size(TaoLogicalSize::new(1360.0, 860.0))
         .with_theme(Some(WindowTheme::Dark))
         .with_window_icon(app_icon.clone());
+
+    if let (Some(x), Some(y)) = (launch_args.x, launch_args.y) {
+        window_builder = window_builder.with_position(TaoLogicalPosition::new(x, y));
+    }
 
     #[cfg(target_os = "windows")]
     let window_builder = window_builder.with_taskbar_icon(app_icon);
@@ -1046,6 +1124,8 @@ fn main() {
         tab_zooms: HashMap::new(),
         last_telemetry_sent: None,
         last_trim_at: None,
+        initial_url: launch_args.url,
+        initial_private: launch_args.is_private,
     };
 
     let mut tab_webviews: HashMap<String, WebView> = HashMap::new();
@@ -1639,6 +1719,50 @@ fn main() {
                         toggle_window_fullscreen(&mut state, &window, &chrome_webview);
                         return;
                     }
+                    "detach_tab_window" | "open_new_window" => {
+                        let target_url = msg
+                            .url
+                            .unwrap_or_else(|| "ferrox://speed-dial".to_string());
+                        let is_private = msg.is_private.unwrap_or(false);
+                        spawn_ferrox_window(&target_url, msg.left, msg.top, is_private);
+                        return;
+                    }
+                    "tab_mute" => {
+                        let key = msg.tab_id.or_else(|| state.active_tab_key.clone());
+                        let muted = msg.enabled.unwrap_or(true);
+                        if let Some(k) = key {
+                            if let Some(wv) = tab_webviews.get(&k) {
+                                let script = if muted {
+                                    r#"(function(){
+                                        window.__ferroxTabMuted = true;
+                                        var apply = function(){
+                                            document.querySelectorAll('audio,video').forEach(function(m){
+                                                if (!m.dataset.fxPrevMuted) m.dataset.fxPrevMuted = m.muted ? '1' : '0';
+                                                m.muted = true;
+                                            });
+                                        };
+                                        apply();
+                                        if (!window.__ferroxMuteObserver && document.documentElement) {
+                                            window.__ferroxMuteObserver = new MutationObserver(function(){
+                                                if (window.__ferroxTabMuted) apply();
+                                            });
+                                            window.__ferroxMuteObserver.observe(document.documentElement, { childList: true, subtree: true });
+                                        }
+                                    })();"#
+                                } else {
+                                    r#"(function(){
+                                        window.__ferroxTabMuted = false;
+                                        document.querySelectorAll('audio,video').forEach(function(m){
+                                            m.muted = m.dataset.fxPrevMuted === '1';
+                                            delete m.dataset.fxPrevMuted;
+                                        });
+                                    })();"#
+                                };
+                                let _ = wv.evaluate_script(script);
+                            }
+                        }
+                        return;
+                    }
                     "open_download_file" => {
                         if let Some(path) = msg.path {
                             open_file_in_os(&path);
@@ -1806,11 +1930,12 @@ fn main() {
                     "set_search_engine" => {
                         if let Some(engine) = msg.engine {
                             state.core.config.search_engine = match engine.as_str() {
+                                "duckduckgo" => "https://duckduckgo.com/?q=".to_string(),
                                 "wikipedia" => {
                                     "https://en.wikipedia.org/w/index.php?search=".to_string()
                                 }
                                 "crates" => "https://crates.io/search?q=".to_string(),
-                                _ => "https://duckduckgo.com/?q=".to_string(),
+                                _ => "https://www.google.com/search?q=".to_string(),
                             };
                             state.core.config.search_engine_id = engine;
                             let _ = state.core.config.save();

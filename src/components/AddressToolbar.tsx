@@ -35,6 +35,8 @@ interface AddressToolbarProps {
   pipActive: boolean;
   shieldEnabled: boolean;
   vpnEnabled: boolean;
+  vpnPingMs?: number;
+  vpnRegion?: string;
   httpsOnly: boolean;
   upgradedFromHttp?: boolean;
   insecureHttp?: boolean;
@@ -81,6 +83,8 @@ export const AddressToolbar = memo(function AddressToolbar({
   pipActive,
   shieldEnabled,
   vpnEnabled,
+  vpnPingMs,
+  vpnRegion,
   httpsOnly,
   upgradedFromHttp,
   insecureHttp,
@@ -116,6 +120,7 @@ export const AddressToolbar = memo(function AddressToolbar({
   );
   const [permOpen, setPermOpen] = useState(false);
   const [translateOpen, setTranslateOpen] = useState(false);
+  const [focused, setFocused] = useState(false);
 
   useEffect(() => {
     setDraft(currentUrl === 'ferrox://speed-dial' ? '' : currentUrl);
@@ -223,8 +228,12 @@ export const AddressToolbar = memo(function AddressToolbar({
               type="text"
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              onFocus={(e) => e.currentTarget.select()}
-              placeholder="Search the web or enter URL (e.g. rust-lang.org)"
+              onFocus={(e) => {
+                setFocused(true);
+                e.currentTarget.select();
+              }}
+              onBlur={() => setFocused(false)}
+              placeholder="Search Google or type a URL"
               className="w-full bg-transparent text-xs md:text-sm font-mono-tabular text-slate-100 placeholder:text-slate-500 focus:outline-none"
             />
 
@@ -322,10 +331,19 @@ export const AddressToolbar = memo(function AddressToolbar({
             <button
               type="submit"
               aria-label="Search or go to address"
-              className="h-6 px-2.5 rounded text-xs font-semibold text-white transition-opacity hover:opacity-90 whitespace-nowrap shrink-0"
-              style={{ backgroundColor: 'var(--fx-accent)' }}
+              title="Go"
+              className={`flex items-center justify-center w-6 h-6 rounded-md transition-colors shrink-0 ${
+                focused && draft.trim().length > 0
+                  ? 'text-white'
+                  : 'text-slate-400 hover:text-white hover:bg-white/10'
+              }`}
+              style={
+                focused && draft.trim().length > 0
+                  ? { backgroundColor: 'var(--fx-accent)' }
+                  : undefined
+              }
             >
-              Go
+              <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
             </button>
           </div>
         </form>
@@ -399,16 +417,22 @@ export const AddressToolbar = memo(function AddressToolbar({
           )}
         </button>
 
+        <span className="hidden sm:block w-px h-4 bg-white/10 mx-0.5" aria-hidden="true" />
+
         <button
           type="button"
           onClick={onOpenShield}
           aria-label="Open Privacy and Shield"
           className={`flex items-center gap-1.5 h-8 px-2.5 rounded-md border text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
             shieldEnabled
-              ? 'bg-[#181C28] border-white/12 text-slate-200 hover:border-white/25'
+              ? 'bg-[#151924] border-white/10 text-slate-200 hover:border-white/22'
               : 'bg-transparent border-white/8 text-slate-500 hover:text-slate-300'
           }`}
-          title={vpnEnabled ? 'Privacy, Shield & VPN Active' : 'Privacy & Ad Shield'}
+          title={
+            vpnEnabled
+              ? `Shield Active · VPN ${vpnRegion ?? ''} (${vpnPingMs ?? '--'} ms)`
+              : 'All-Website Ad & Tracker Shield'
+          }
         >
           {shieldEnabled ? (
             <Shield className="w-3.5 h-3.5 text-emerald-400" aria-hidden="true" />
@@ -416,14 +440,21 @@ export const AddressToolbar = memo(function AddressToolbar({
             <ShieldOff className="w-3.5 h-3.5 text-slate-500" aria-hidden="true" />
           )}
           <span className="font-mono-tabular">{blockedCount}</span>
-          {vpnEnabled && <span className="text-[10px] text-sky-400 font-semibold">VPN</span>}
+          {vpnEnabled && (
+            <span className="flex items-center gap-1 pl-1.5 ml-0.5 border-l border-white/12 text-[10px] font-mono-tabular text-sky-400 font-semibold">
+              <span>VPN</span>
+              {typeof vpnPingMs === 'number' && (
+                <span className="text-emerald-400">{vpnPingMs}ms</span>
+              )}
+            </span>
+          )}
         </button>
 
         <button
           type="button"
           onClick={onOpenLimiter}
           aria-label="Open Resource Limiter and Site Isolation"
-          className="hidden lg:flex items-center gap-1.5 h-8 px-2.5 rounded-md bg-[#181C28] border border-white/12 hover:border-white/25 text-xs font-medium text-slate-200 transition-colors whitespace-nowrap shrink-0"
+          className="hidden lg:flex items-center gap-1.5 h-8 px-2.5 rounded-md bg-[#151924] border border-white/10 hover:border-white/22 text-xs font-medium text-slate-200 transition-colors whitespace-nowrap shrink-0"
         >
           <Cpu className="w-3.5 h-3.5" style={{ color: 'var(--fx-accent)' }} aria-hidden="true" />
           <span className="font-mono-tabular">

@@ -188,7 +188,7 @@ test('Web proxy rewrites target=_blank, intercepts window.open/anchor.click, and
   assert.ok(serverTs.includes("ev.data.type === 'ferrox:find'"));
 });
 
-test('YouTube 4-layer adblock script in adblock.rs prunes ytInitialPlayerResponse, youtubei fetch, stubs ad trackers, skips SSAI ads, and respects live __ferroxSetShield', async () => {
+test('Universal all-website adblock + non-stalling YouTube adblock in adblock.rs', async () => {
   const adblockRs = fs.readFileSync(adblockRsPath, 'utf8');
   const match = adblockRs.match(/pub fn cosmetic_init_script\(&self\) -> &'static str \{\s*r#"([\s\S]*?)"#\s*\}/);
   assert.ok(match && match[1], 'Could not extract cosmetic_init_script JS from adblock.rs');
@@ -196,6 +196,9 @@ test('YouTube 4-layer adblock script in adblock.rs prunes ytInitialPlayerRespons
 
   const ipcMessages: Array<{ action: string; host?: string; url?: string }> = [];
   const upstreamFetchUrls: string[] = [];
+  const openedPopups: string[] = [];
+  const beaconUrls: string[] = [];
+
   type MockStyleNode = {
     id: string;
     textContent: string;
@@ -217,13 +220,19 @@ test('YouTube 4-layer adblock script in adblock.rs prunes ytInitialPlayerRespons
       contains: (cls: string) => playerClasses.has(cls),
     },
   };
+  // Start with readyState=1 (buffering) to verify we DO NOT seek while buffering (prevents infinite spinner!)
   const videoEl = {
     muted: false,
+    readyState: 1,
+    seeking: false,
     duration: 30,
-    currentTime: 1,
+    currentTime: 0,
     playbackRate: 1,
     paused: false,
-    play: () => {},
+    playCalls: 0,
+    play: function () {
+      this.playCalls += 1;
+    },
   };
   const skipBtn = {
     click: () => {
@@ -233,6 +242,7 @@ test('YouTube 4-layer adblock script in adblock.rs prunes ytInitialPlayerRespons
 
   const doc = {
     readyState: 'complete',
+    hidden: false,
     head: {
       appendChild: (node: MockStyleNode) => {
         domState.styleNode = node;
@@ -261,6 +271,59 @@ test('YouTube 4-layer adblock script in adblock.rs prunes ytInitialPlayerRespons
     addEventListener: () => {},
   };
 
+  class MockNode {
+    children: unknown[] = [];
+    appendChild(child: unknown) {
+      this.children.push(child);
+      return child;
+    }
+    insertBefore(child: unknown) {
+      this.children.push(child);
+      return child;
+    }
+  }
+
+  class MockElement extends MockNode {
+    nodeType = 1;
+    tagName = 'SCRIPT';
+    type = 'text/javascript';
+    attrs: Record<string, string> = {};
+    styleMap: Record<string, string> = {};
+    style = {
+      setProperty: (k: string, v: string) => {
+        this.styleMap[k] = v;
+      },
+    };
+    setAttribute(k: string, v: string) {
+      this.attrs[k] = v;
+    }
+    getAttribute(k: string) {
+      return this.attrs[k] ?? null;
+    }
+    removeAttribute(k: string) {
+      delete this.attrs[k];
+    }
+  }
+
+  const xhrEvents: string[] = [];
+  class MockXHR {
+    readyState = 0;
+    status = 0;
+    statusText = '';
+    responseText = '';
+    response: unknown = '';
+    responseType = '';
+    sentUpstream = false;
+    open(_method: string, _url: string) {}
+    send() {
+      this.sentUpstream = true;
+    }
+    dispatchEvent(ev: { type: string }) {
+      xhrEvents.push(ev.type);
+      return true;
+    }
+  }
+
   const sandbox: Record<string, unknown> = {
     URL,
     Response,
@@ -272,8 +335,27 @@ test('YouTube 4-layer adblock script in adblock.rs prunes ytInitialPlayerRespons
     String,
     Boolean,
     Date,
+    Event: class {
+      type: string;
+      constructor(type: string) {
+        this.type = type;
+      }
+    },
+    Node: MockNode,
+    Element: MockElement,
+    XMLHttpRequest: MockXHR,
     JSON: { parse: JSON.parse, stringify: JSON.stringify },
     document: doc,
+    navigator: {
+      sendBeacon: (url: string) => {
+        beaconUrls.push(url);
+        return true;
+      },
+    },
+    open: (url: string) => {
+      openedPopups.push(url);
+      return { closed: false };
+    },
     location: {
       href: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
       hostname: 'www.youtube.com',
@@ -282,6 +364,10 @@ test('YouTube 4-layer adblock script in adblock.rs prunes ytInitialPlayerRespons
       postMessage: (raw: string) => {
         ipcMessages.push(JSON.parse(raw));
       },
+    },
+    setTimeout: (cb: () => void) => {
+      cb();
+      return 1;
     },
     setInterval: (cb: () => void) => {
       domState.intervalCallback = cb;
@@ -293,11 +379,20 @@ test('YouTube 4-layer adblock script in adblock.rs prunes ytInitialPlayerRespons
         return new Response(
           JSON.stringify({
             videoDetails: { videoId: 'dQw4w9WgXcQ', title: 'Test Video' },
+            streamingData: { formats: [{ itag: 18 }] },
+            playerConfig: { ssapConfig: { enabled: true }, audioConfig: { loudnessDb: -2 } },
             adPlacements: [{ adPlacementRenderer: { id: 'preroll-1' } }],
             playerAds: [{ playerLegacyDesktopWatchAdsRenderer: {} }],
             adSlots: [{ adSlotRenderer: {} }],
+            adBreakParams: 'break-token',
           }),
-          { status: 200, headers: { 'content-type': 'application/json; charset=UTF-8' } }
+          {
+            status: 200,
+            headers: {
+              'content-type': 'application/json; charset=UTF-8',
+              'content-encoding': 'gzip',
+            },
+          }
         );
       }
       return new Response('ok', { status: 200 });
@@ -308,107 +403,131 @@ test('YouTube 4-layer adblock script in adblock.rs prunes ytInitialPlayerRespons
   const ctx = vm.createContext(sandbox);
   vm.runInContext(adblockScript, ctx);
 
-  // 1. Cosmetic CSS was injected and SSAI ad was immediately muted, fast-forwarded, and skipped
+  // 1. Cosmetic CSS hides universal ad slots & YouTube feed ads, but MUST NOT hide .ytp-ad-module or .video-ads
   assert.ok(domState.styleNode && domState.styleNode.textContent.includes('ytd-ad-slot-renderer'));
+  assert.ok(domState.styleNode.textContent.includes('[id^="div-gpt-ad"]'));
+  assert.ok(domState.styleNode.textContent.includes('.OUTBRAIN'));
+  assert.equal(domState.styleNode.textContent.includes('.ytp-ad-module'), false);
+  assert.equal(domState.styleNode.textContent.includes('.video-ads'), false);
+
+  // 2. While readyState < 2 (buffering), SSAI failsafe MUST NOT seek (prevents YouTube infinite loading spinner!)
   assert.equal(videoEl.muted, true);
-  assert.equal(videoEl.playbackRate, 16);
-  assert.ok(videoEl.currentTime >= 29.9);
+  assert.equal(videoEl.currentTime, 0, 'Must not seek video while readyState < 2');
+  assert.equal(videoEl.playbackRate, 1, 'Must not force fast playbackRate while readyState < 2');
   assert.equal(domState.skipBtnClicked, true);
 
-  // Once ad ends, mute & playbackRate must restore cleanly
-  playerClasses.delete('ad-showing');
+  // Once readyState >= 2, SSAI failsafe seeks cleanly to duration and speeds up, then restores when ad ends
+  videoEl.readyState = 4;
   assert.ok(domState.intervalCallback, 'Expected SSAI sweep interval to be registered');
+  domState.intervalCallback();
+  assert.equal(videoEl.currentTime, 30);
+  assert.equal(videoEl.playbackRate, 8);
+
+  playerClasses.delete('ad-showing');
   domState.intervalCallback();
   assert.equal(videoEl.muted, false);
   assert.equal(videoEl.playbackRate, 1);
 
-  // 2. Assigning ytInitialPlayerResponse strips adPlacements/playerAds/adSlots while preserving videoDetails
+  // 3. Assigning ytInitialPlayerResponse deletes adPlacements/playerAds/adSlots/ssapConfig while keeping videoDetails
   vm.runInContext(
     `window.ytInitialPlayerResponse = {
       videoDetails: { videoId: 'abc123' },
+      playerConfig: { ssapConfig: { active: true }, audioConfig: { ok: true } },
       adPlacements: [{ id: 1 }],
       playerAds: [{ id: 2 }],
       adSlots: [{ id: 3 }],
-      adBreakHeartbeatParams: 'token'
+      adBreakParams: 'token'
     };`,
     ctx
   );
   const playerResp = JSON.parse(JSON.stringify(sandbox.ytInitialPlayerResponse)) as Record<string, unknown>;
   assert.deepEqual(playerResp.videoDetails, { videoId: 'abc123' });
-  assert.deepEqual(playerResp.adPlacements, []);
-  assert.deepEqual(playerResp.playerAds, []);
-  assert.deepEqual(playerResp.adSlots, []);
-  assert.equal('adBreakHeartbeatParams' in playerResp, false);
+  assert.equal('adPlacements' in playerResp, false);
+  assert.equal('playerAds' in playerResp, false);
+  assert.equal('adSlots' in playerResp, false);
+  assert.equal('adBreakParams' in playerResp, false);
+  assert.deepEqual(playerResp.playerConfig, { audioConfig: { ok: true } });
 
-  // 3. JSON.parse strips feed adSlotRenderer entries while keeping real videos
-  const parsedFeed = JSON.parse(
-    JSON.stringify(
-      vm.runInContext(
-        `JSON.parse(JSON.stringify({
-          contents: {
-            items: [
-              { adSlotRenderer: { tracking: 'x' } },
-              { videoRenderer: { videoId: 'real-vid' } }
-            ]
-          }
-        }))`,
-        ctx
-      )
-    )
-  ) as { contents: { items: Array<Record<string, unknown>> } };
-  assert.equal(parsedFeed.contents.items.length, 1);
-  assert.ok(parsedFeed.contents.items[0].videoRenderer);
-
-  // 4. Tracker fetch returns clean 200 OK stub without hitting upstream network
+  // 4. YouTube playback-critical endpoints MUST NEVER be blocked (no more infinite loading!)
   const fetchFn = sandbox.fetch as (url: string) => Promise<Response>;
-  const adRes = await fetchFn('https://googleads.g.doubleclick.net/pagead/ads?client=yt');
-  assert.equal(adRes.status, 200);
-  assert.equal(await adRes.text(), '');
-  assert.equal(
-    upstreamFetchUrls.some((u) => u.includes('doubleclick.net')),
-    false,
-    'Blocked ad tracker must never reach upstream fetch'
-  );
+  await fetchFn('https://www.youtube.com/api/stats/atr?ns=yt&docid=abc');
+  await fetchFn('https://www.youtube.com/ptracking?video_id=abc');
+  await fetchFn('https://www.youtube.com/youtubei/v1/log_event');
+  await fetchFn('https://rr1---sn-abc.googlevideo.com/videoplayback?expire=999');
+  assert.equal(upstreamFetchUrls.some((u) => u.includes('/api/stats/atr')), true);
+  assert.equal(upstreamFetchUrls.some((u) => u.includes('/ptracking')), true);
+  assert.equal(upstreamFetchUrls.some((u) => u.includes('/youtubei/v1/log_event')), true);
+  assert.equal(upstreamFetchUrls.some((u) => u.includes('googlevideo.com')), true);
 
-  // 5. YouTube /youtubei/v1/player fetch returns sanitized Response JSON
+  // 5. YouTube /youtubei/v1/player fetch returns pruned JSON without content-encoding and with valid url
   const ytApiRes = await fetchFn('https://www.youtube.com/youtubei/v1/player?prettyPrint=false');
   assert.equal(ytApiRes.status, 200);
+  assert.equal(ytApiRes.headers.get('content-encoding'), null);
   const ytApiJson = (await ytApiRes.json()) as Record<string, unknown>;
   assert.deepEqual(ytApiJson.videoDetails, { videoId: 'dQw4w9WgXcQ', title: 'Test Video' });
-  assert.deepEqual(ytApiJson.adPlacements, []);
-  assert.deepEqual(ytApiJson.playerAds, []);
-  assert.deepEqual(ytApiJson.adSlots, []);
+  assert.ok(ytApiJson.streamingData);
+  assert.equal('adPlacements' in ytApiJson, false);
+  assert.equal('playerAds' in ytApiJson, false);
+  assert.equal('adSlots' in ytApiJson, false);
 
-  // Verify ad_blocked IPC notifications fired
-  assert.ok(
-    ipcMessages.some((m) => m.action === 'ad_blocked' && m.host === 'youtube-ads'),
-    'Expected youtube-ads ad_blocked IPC message'
-  );
-  assert.ok(
-    ipcMessages.some((m) => m.action === 'ad_blocked' && m.host === 'googleads.g.doubleclick.net'),
-    'Expected doubleclick ad_blocked IPC message'
-  );
+  // 6. Universal ad blocking across ALL websites: Taboola, Outbrain, Criteo, PubMatic, PopAds, Mediavine, etc.
+  const taboolaRes = await fetchFn('https://cdn.taboola.com/libtrc/site/loader.js');
+  assert.equal(taboolaRes.status, 200);
+  assert.ok((await taboolaRes.text()).includes('blocked'));
+  const adBreakRes = await fetchFn('https://www.youtube.com/youtubei/v1/ad_break?prettyPrint=false');
+  assert.deepEqual(await adBreakRes.json(), {});
+  assert.equal(upstreamFetchUrls.some((u) => u.includes('taboola.com')), false);
+  assert.equal(upstreamFetchUrls.some((u) => u.includes('/ad_break')), false);
 
-  // 6. Live __ferroxSetShield(false) removes CSS and allows fetch pass-through
+  // 7. Blocked XHR dispatches readystatechange + load + loadend events so callers never hang
+  const xhr = new MockXHR();
+  xhr.open('GET', 'https://securepubads.g.doubleclick.net/gampad/ads');
+  xhr.send();
+  assert.equal(xhr.sentUpstream, false);
+  assert.deepEqual(xhrEvents, ['readystatechange', 'load', 'loadend']);
+
+  // 8. Universal DOM guard neutralizes ad <script> & <iframe> on appendChild + popunder window.open + sendBeacon
+  const container = new MockNode();
+  const adScriptEl = new MockElement();
+  adScriptEl.tagName = 'SCRIPT';
+  adScriptEl.attrs.src = 'https://static.criteo.net/js/ld/publishertag.js';
+  container.appendChild(adScriptEl);
+  assert.equal(adScriptEl.attrs.src, undefined);
+  assert.equal(adScriptEl.type, 'javascript/blocked');
+  assert.equal(adScriptEl.attrs['data-ferrox-blocked'], 'static.criteo.net');
+
+  const adIframeEl = new MockElement();
+  adIframeEl.tagName = 'IFRAME';
+  adIframeEl.attrs.src = 'https://ads.pubmatic.com/AdServer/frame.html';
+  container.appendChild(adIframeEl);
+  assert.equal(adIframeEl.attrs.src, 'about:blank');
+  assert.equal(adIframeEl.styleMap.display, 'none');
+
+  const openFn = sandbox.open as (url: string) => unknown;
+  assert.equal(openFn('https://serve.popads.net/pop?id=9'), null);
+  assert.notEqual(openFn('https://accounts.google.com/signin'), null);
+  assert.equal(openedPopups.length, 1);
+
+  const nav = sandbox.navigator as { sendBeacon: (url: string) => boolean };
+  assert.equal(nav.sendBeacon('https://pixel.rubiconproject.com/track'), true);
+  assert.equal(beaconUrls.length, 0);
+
+  // 9. Live __ferroxSetShield(false) disables shield cleanly and re-enabling merges custom rules
   const setShield = sandbox.__ferroxSetShield as (enabled: boolean, rules?: string[]) => void;
   setShield(false);
-  assert.equal(domState.styleNode, null, 'Disabling Shield must remove cosmetic CSS immediately');
+  assert.equal(domState.styleNode, null);
   await fetchFn('https://googleads.g.doubleclick.net/pagead/ads?bypass=1');
-  assert.equal(
-    upstreamFetchUrls.some((u) => u.includes('bypass=1')),
-    true,
-    'Disabled Shield must pass requests through untouched'
-  );
+  assert.equal(upstreamFetchUrls.some((u) => u.includes('bypass=1')), true);
 
-  // Re-enabling Shield with custom rules restores CSS and blocks custom domain
   setShield(true, ['custom-tracker.test']);
-  assert.ok(domState.styleNode !== null, 'Re-enabling Shield must re-inject cosmetic CSS');
+  assert.ok(domState.styleNode !== null);
   const customRes = await fetchFn('https://ads.custom-tracker.test/pixel.js');
   assert.equal(customRes.status, 200);
-  assert.equal(
-    upstreamFetchUrls.some((u) => u.includes('custom-tracker.test')),
-    false
-  );
+  assert.equal(upstreamFetchUrls.some((u) => u.includes('custom-tracker.test')), false);
+  // Built-in universal rules remain active after custom rules merge
+  const outbrainRes = await fetchFn('https://widgets.outbrain.com/outbrain.js');
+  assert.equal(outbrainRes.status, 200);
+  assert.equal(upstreamFetchUrls.some((u) => u.includes('outbrain.com')), false);
 });
 
 test('GitHub Actions build-windows.yml avoids invalid secrets context in if expressions', () => {
@@ -574,3 +693,28 @@ test('Rust native shell shares one WebContext, caps GPU/V8 memory, walks full pr
   assert.ok(importerRs.includes('_side_profiles'));
   assert.ok(importerRs.includes('profile_name'));
 });
+
+test('Rust native shell supports tab detachment to new OS windows, tab muting, Google default search, and 3 clean default bookmarks', () => {
+  const mainRs = fs.readFileSync(mainRsPath, 'utf8');
+  assert.ok(mainRs.includes('parse_launch_args'));
+  assert.ok(mainRs.includes('spawn_ferrox_window'));
+  assert.ok(mainRs.includes('"detach_tab_window"'));
+  assert.ok(mainRs.includes('"open_new_window"'));
+  assert.ok(mainRs.includes('"tab_mute"'));
+  assert.ok(mainRs.includes('__ferroxTabMuted'));
+  assert.ok(mainRs.includes('__ferroxMuteObserver'));
+  assert.ok(mainRs.includes('initial_url'));
+  assert.ok(mainRs.includes('https://www.google.com/search?q='));
+  assert.ok(mainRs.includes("'new_window'"));
+  assert.ok(mainRs.includes("'mute_tab'"));
+
+  const browserRs = fs.readFileSync(path.join(rustSrcDir, 'browser.rs'), 'utf8');
+  assert.ok(browserRs.includes('search_engine_id: "google".to_string()'));
+  assert.ok(browserRs.includes('https://www.google.com/search?q='));
+  assert.ok(browserRs.includes('https://www.google.com'));
+  assert.ok(browserRs.includes('https://www.youtube.com'));
+  assert.ok(browserRs.includes('https://en.wikipedia.org'));
+  assert.equal(browserRs.includes('Example Domain'), false);
+  assert.equal(browserRs.includes('Crates.io'), false);
+});
+

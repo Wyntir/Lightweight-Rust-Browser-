@@ -59,27 +59,45 @@ const PORT = Number(process.env.PORT || 3000);
 const RUST_CRATE_DIR = path.resolve(process.cwd(), 'rust-browser');
 
 const DEFAULT_TRACKER_DOMAINS = [
-  'doubleclick.net',
-  'googlesyndication.com',
-  'googleadservices.com',
-  'google-analytics.com',
-  'googletagmanager.com',
-  'adservice.google.com',
-  'pagead2.googlesyndication.com',
-  'static.doubleclick.net',
-  'connect.facebook.net',
-  'scorecardresearch.com',
-  'mixpanel.com',
-  'hotjar.com',
-  'segment.io',
-  'ads.twitter.com',
-  'coinhive.com',
-  'coin-hive.com',
-  'cryptoloot.pro',
-  'crypto-loot.com',
-  'webminepool.com',
-  'minero.cc',
-  'jsecoin.com',
+  'doubleclick.net', 'googlesyndication.com', 'googleadservices.com',
+  'google-analytics.com', 'googletagmanager.com', 'adservice.google.com',
+  'pagead2.googlesyndication.com', 'tpc.googlesyndication.com', 'static.doubleclick.net',
+  'googleads.g.doubleclick.net', 'securepubads.g.doubleclick.net', 'adclick.g.doubleclick.net',
+  'imasdk.googleapis.com', '2mdn.net', 'fundingchoicesmessages.google.com',
+  'adnxs.com', 'pubmatic.com', 'rubiconproject.com', 'openx.net', 'casalemedia.com',
+  'indexww.com', 'criteo.com', 'criteo.net', 'amazon-adsystem.com', 'aax.amazon-adsystem.com',
+  'adsrvr.org', 'bidswitch.net', 'smartadserver.com', '3lift.com', 'triplelift.com',
+  'sharethrough.com', 'lijit.com', 'yieldmo.com', 'gumgum.com', 'teads.tv',
+  'spotxchange.com', 'spotx.tv', 'springserve.com', 'contextweb.com', 'media.net',
+  'adform.net', 'adroll.com', 'turn.com', 'mathtag.com', 'rlcdn.com', 'id5-sync.com',
+  'crwdcntrl.net', 'bluekai.com', 'demdex.net', 'krxd.net', 'eyeota.net', 'tapad.com',
+  'agkn.com', 'permutive.com', 'btloader.com', 'connatix.com', 'primis.tech', 'vidazoo.com',
+  'aniview.com', 'vidoomy.com', 'rhythmone.com', 'undertone.com', 'kargo.com', 'sonobi.com',
+  'emxdgt.com', '1rx.io', '33across.com', 'stickyadstv.com', 'inmobi.com',
+  'unityads.unity3d.com', 'applovin.com', 'vungle.com', 'ironsrc.com', 'chartboost.com',
+  'mediavine.com', 'adthrive.com', 'cafemedia.com', 'ezoic.net', 'ezojs.com', 'ezodn.com',
+  'freestar.io', 'playwire.com', 'snigelweb.com', 'nitropay.com', 'buysellads.com',
+  'carbonads.com', 'carbonads.net', 'proper.io', 'adpushup.com', 'setupad.com', 'vlitag.com',
+  'ay.delivery', 'htlbid.com',
+  'taboola.com', 'outbrain.com', 'mgid.com', 'revcontent.com', 'ntv.io', 'dianomi.com',
+  'zergnet.com', 'content.ad', 'adblade.com', 'zemanta.com', 'ligatus.com', 'plista.com',
+  'popads.net', 'popcash.net', 'propellerads.com', 'onclickalgo.com', 'monetag.com',
+  'exoclick.com', 'trafficjunky.net', 'trafficstars.com', 'juicyads.com', 'adsterra.com',
+  'hilltopads.net', 'clickadu.com', 'richpush.co', 'admaven.com', 'acscdn.com',
+  'highperformanceformat.com', 'profitablegatecpm.com', 'topcreativeformat.com',
+  'connect.facebook.net', 'ads.twitter.com', 'ads-api.twitter.com', 'analytics.twitter.com',
+  'static.ads-twitter.com', 'bat.bing.com', 'ads.microsoft.com', 'advertising.com',
+  'ads.yahoo.com', 'adtech.de', 'analytics.tiktok.com', 'sc-static.net', 'tr.snapchat.com',
+  'px.ads.linkedin.com', 'snap.licdn.com', 'ct.pinterest.com', 'alb.reddit.com',
+  'events.redditmedia.com', 'fls-na.amazon.com', 'mads.amazon.com',
+  'scorecardresearch.com', 'quantserve.com', 'mixpanel.com', 'hotjar.com', 'segment.io',
+  'fullstory.com', 'crazyegg.com', 'mouseflow.com', 'luckyorange.com', 'inspectlet.com',
+  'chartbeat.com', 'chartbeat.net', 'omtrdc.net', '2o7.net', 'moatads.com',
+  'doubleverify.com', 'adsafeprotected.com', 'integralads.com', 'bam.nr-data.net',
+  'clarity.ms', 'amplitude.com', 'heapanalytics.com', 'kissmetrics.com', 'adjust.com',
+  'appsflyer.com',
+  'coinhive.com', 'coin-hive.com', 'cryptoloot.pro', 'crypto-loot.com', 'webminepool.com',
+  'minero.cc', 'jsecoin.com', 'authedmine.com', 'monerominer.rocks', 'coinimp.com',
 ];
 
 const TRACKING_QUERY_PARAMS = new Set([
@@ -392,10 +410,15 @@ window.addEventListener('message', function(ev) {
 });
 </script>`;
 
+  const adHideStyle = shieldEnabled
+    ? `ins.adsbygoogle, .adsbygoogle, [id^="google_ads_iframe"], [id^="div-gpt-ad"], [data-ad-slot], [data-ad-unit], .OUTBRAIN, .ob-widget, [id^="taboola-"], .trc_related_container, .adthrive-ad, .mediavine-ad, .ezoic-ad, .ad-banner, .ad-leaderboard, .ad-sidebar, .ad-slot, .banner-ad, .sponsored-ad, shreddit-ad-post { display: none !important; }`
+    : '';
+
   const fallbackStyle = `
 <style>
   html, body { font-family: system-ui, -apple-system, sans-serif; line-height: 1.55; }
   img { max-width: 100%; height: auto; }
+  ${adHideStyle}
 </style>`;
 
   if (/<\/head>/i.test(cleaned)) {

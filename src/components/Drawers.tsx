@@ -10,6 +10,7 @@ import {
   PanelLeft,
   PauseCircle,
   Plus,
+  RefreshCw,
   Shield,
   Trash2,
   Wifi,
@@ -26,8 +27,9 @@ import {
   Tab,
   TabGroup,
   TabGroupColor,
-  VPN_SERVERS,
+  UserGeoLocation,
   VpnProtocolId,
+  VpnServerWithPing,
   WORKSPACES,
   WorkspaceId,
 } from '../lib/browserEngine';
@@ -51,6 +53,10 @@ interface DrawersProps {
   trackerRules: string[];
   blockedEvents: BlockedEvent[];
   privacyConfig: PrivacySecurityConfig;
+  userGeo: UserGeoLocation;
+  vpnServers: VpnServerWithPing[];
+  vpnPinging?: boolean;
+  onRefreshVpnPing: () => void;
   onClose: () => void;
   onUpdateLimiter: (next: LimiterConfig) => void;
   onHibernateInactive: () => void;
@@ -174,6 +180,10 @@ export function Drawers({
   trackerRules,
   blockedEvents,
   privacyConfig,
+  userGeo,
+  vpnServers,
+  vpnPinging = false,
+  onRefreshVpnPing,
   onClose,
   onUpdateLimiter,
   onHibernateInactive,
@@ -265,7 +275,9 @@ export function Drawers({
   const ramRatio = limiter.ramEnabled ? (totalRamMb / Math.max(1, limiter.ramLimitMb)) * 100 : (totalRamMb / 2048) * 100;
   const cpuRatio = limiter.cpuEnabled ? (totalCpuPercent / Math.max(1, limiter.cpuLimitPercent)) * 100 : totalCpuPercent;
   const currentVpnServer =
-    VPN_SERVERS.find((s) => s.region === privacyConfig.vpnRegion) ?? VPN_SERVERS[0];
+    vpnServers.find((s) => s.region === privacyConfig.vpnRegion) ?? vpnServers[0];
+  const pingColorClass = (ms: number) =>
+    ms < 60 ? 'text-emerald-400' : ms < 130 ? 'text-amber-400' : 'text-rose-400';
 
   return (
     <section
@@ -672,10 +684,18 @@ export function Drawers({
                     <div className="text-sky-300">{currentVpnServer.virtualIp}</div>
                   </div>
                   <div>
-                    <div className="text-slate-500">Ping / Load</div>
-                    <div className="text-emerald-400">
+                    <div className="text-slate-500">Location Ping · Load</div>
+                    <div className={pingColorClass(currentVpnServer.latencyMs)}>
                       {currentVpnServer.latencyMs} ms · {currentVpnServer.loadPercent}%
                     </div>
+                  </div>
+                  <div className="col-span-2 flex items-center justify-between text-[10px] text-slate-400 pt-1 border-t border-white/6">
+                    <span>From {userGeo.label}</span>
+                    <span>
+                      {currentVpnServer.distanceKm < 120
+                        ? 'Local node'
+                        : `~${currentVpnServer.distanceKm.toLocaleString()} km`}
+                    </span>
                   </div>
                 </div>
               )}
@@ -683,9 +703,26 @@ export function Drawers({
 
             {/* Exit Server Locations */}
             <div className="space-y-2">
-              <div className="text-xs font-semibold text-slate-400">Exit Location</div>
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-semibold text-slate-300">Exit Location</div>
+                  <div className="text-[10px] text-slate-500">
+                    Ping calculated from {userGeo.label} ({userGeo.timeZone})
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={onRefreshVpnPing}
+                  disabled={vpnPinging}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white/8 hover:bg-white/14 text-[11px] text-slate-200 transition-colors shrink-0"
+                  title="Re-measure location ping"
+                >
+                  <RefreshCw className={`w-3 h-3 ${vpnPinging ? 'animate-spin' : ''}`} aria-hidden="true" />
+                  {vpnPinging ? 'Pinging' : 'Re-ping'}
+                </button>
+              </div>
               <div className="space-y-1.5">
-                {VPN_SERVERS.map((srv) => {
+                {vpnServers.map((srv) => {
                   const selected = privacyConfig.vpnRegion === srv.region;
                   return (
                     <button
@@ -704,12 +741,23 @@ export function Drawers({
                           : 'bg-black/25 border-white/8 text-slate-300 hover:border-white/15'
                       }`}
                     >
-                      <div>
-                        <div className="text-xs font-medium">{srv.region}</div>
-                        <div className="text-[11px] text-slate-400">{srv.label}</div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 text-xs font-medium">
+                          <span>{srv.region}</span>
+                          {srv.isFastest && (
+                            <span className="px-1.5 py-0.2 rounded bg-emerald-500/15 border border-emerald-400/30 text-[9px] font-semibold uppercase tracking-wide text-emerald-300">
+                              Fastest
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-slate-400 truncate">
+                          {srv.label} · {srv.distanceKm < 120 ? 'Local' : `${srv.distanceKm.toLocaleString()} km`}
+                        </div>
                       </div>
-                      <div className="text-right font-mono-tabular text-[11px]">
-                        <div className="text-emerald-400">{srv.latencyMs} ms</div>
+                      <div className="text-right font-mono-tabular text-[11px] shrink-0">
+                        <div className={`font-semibold ${pingColorClass(srv.latencyMs)}`}>
+                          {srv.latencyMs} ms
+                        </div>
                         <div className="text-slate-500">{srv.loadPercent}% load</div>
                       </div>
                     </button>
@@ -829,23 +877,41 @@ export function Drawers({
                       key={ws.id}
                       type="button"
                       onClick={() => onSelectWorkspace(ws.id)}
-                      className={`w-full flex items-center justify-between p-2.5 rounded-lg border text-left transition-colors ${
+                      className={`relative w-full flex items-center justify-between p-2.5 rounded-lg border text-left transition-colors ${
                         active
-                          ? 'bg-[#171C28] border-white/25 text-white'
+                          ? 'bg-[#171C28] border-white/22 text-white'
                           : 'bg-black/25 border-white/8 text-slate-300 hover:border-white/15'
                       }`}
                     >
-                      <div className="min-w-0">
+                      {active && (
+                        <span
+                          className="absolute left-0 top-2 bottom-2 w-[2px] rounded-r"
+                          style={{ backgroundColor: 'var(--fx-accent)' }}
+                          aria-hidden="true"
+                        />
+                      )}
+                      <div className="min-w-0 pr-2">
                         <div className="text-xs font-semibold">{ws.label}</div>
                         <div className="text-[11px] text-slate-400 truncate">{ws.description}</div>
                       </div>
-                      <span className="font-mono-tabular text-xs px-2 py-0.5 rounded bg-white/8 text-slate-200 shrink-0">
-                        {count}
+                      <span
+                        className={`font-mono-tabular text-[11px] px-2 py-0.5 rounded shrink-0 ${
+                          count === 0
+                            ? 'bg-white/[0.04] text-slate-500'
+                            : 'bg-white/10 text-slate-100'
+                        }`}
+                      >
+                        {count} {count === 1 ? 'tab' : 'tabs'}
                       </span>
                     </button>
                   );
                 })}
               </div>
+              {workspaceTabs.length === 0 && (
+                <div className="text-[11px] text-slate-400 bg-black/20 border border-white/6 rounded-lg px-2.5 py-2">
+                  0 tabs open in this workspace. Browse from Speed Dial or press Ctrl+T to open a tab.
+                </div>
+              )}
             </div>
 
             <div className="space-y-2.5 pb-4 border-b border-white/8">
@@ -1049,9 +1115,9 @@ export function Drawers({
                     aria-hidden="true"
                   />
                   <div>
-                    <div className="text-sm font-medium text-white">Ad &amp; Tracker Shield</div>
+                    <div className="text-sm font-medium text-white">All-Site &amp; YouTube Ad Shield</div>
                     <div className="font-mono-tabular text-xs text-slate-400">
-                      {blockedEvents.length} blocked this session
+                      {blockedEvents.length} blocked · {trackerRules.length} ad &amp; tracker rules
                     </div>
                   </div>
                 </div>

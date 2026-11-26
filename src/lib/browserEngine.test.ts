@@ -327,7 +327,12 @@ test('duplicateTab clones tab URL, title, workspace, group, privacy, and history
   assert.equal(copy.historyIndex, original.historyIndex);
 });
 
-import { findIdleTabsToHibernate } from './browserEngine';
+import {
+  detectUserGeoFromTimezone,
+  findIdleTabsToHibernate,
+  getVpnServersWithLocationPing,
+  mergeDefaultTrackerRules,
+} from './browserEngine';
 
 test('findIdleTabsToHibernate respects slider threshold and skips active, split, pinned, and internal tabs', () => {
   const now = 1_000_000;
@@ -357,3 +362,148 @@ test('findIdleTabsToHibernate respects slider threshold and skips active, split,
   );
   assert.deepEqual(disabled, []);
 });
+
+test('VPN ping reflects geographic distance from user location and protocol overhead', () => {
+  const laGeo = detectUserGeoFromTimezone('America/Los_Angeles');
+  const laWireguard = getVpnServersWithLocationPing(laGeo, 'wireguard');
+  const laUsWest = laWireguard.find((s) => s.region === 'US West')!;
+  const laSingapore = laWireguard.find((s) => s.region === 'Singapore')!;
+  assert.equal(laUsWest.isFastest, true);
+  assert.ok(laUsWest.latencyMs < 25, `Expected LA -> US West ping < 25ms, got ${laUsWest.latencyMs}`);
+  assert.ok(laSingapore.latencyMs > 120, `Expected LA -> Singapore ping > 120ms, got ${laSingapore.latencyMs}`);
+
+  const tokyoGeo = detectUserGeoFromTimezone('Asia/Tokyo');
+  const tokyoWireguard = getVpnServersWithLocationPing(tokyoGeo, 'wireguard');
+  const tokyoNode = tokyoWireguard.find((s) => s.region === 'Tokyo')!;
+  const tokyoUsEast = tokyoWireguard.find((s) => s.region === 'US East')!;
+  assert.equal(tokyoNode.isFastest, true);
+  assert.ok(tokyoNode.latencyMs < 25);
+  assert.ok(tokyoUsEast.latencyMs > 100);
+
+  const laOpenVpn = getVpnServersWithLocationPing(laGeo, 'openvpn');
+  const laUsWestOpenVpn = laOpenVpn.find((s) => s.region === 'US West')!;
+  assert.ok(
+    laUsWestOpenVpn.latencyMs > laUsWest.latencyMs,
+    'OpenVPN should report higher protocol latency than WireGuard'
+  );
+});
+
+test('mergeDefaultTrackerRules upgrades legacy saved rules with universal ad networks while keeping custom domains', () => {
+  const merged = mergeDefaultTrackerRules(['doubleclick.net', 'my-custom-ad.example']);
+  assert.ok(merged.length > 120, `Expected > 120 universal rules, got ${merged.length}`);
+  assert.ok(merged.includes('taboola.com'));
+  assert.ok(merged.includes('outbrain.com'));
+  assert.ok(merged.includes('criteo.com'));
+  assert.ok(merged.includes('popads.net'));
+  assert.ok(merged.includes('my-custom-ad.example'));
+});
+
+import {
+  DEFAULT_BOOKMARKS,
+  getTabsToRight,
+  migrateLegacyBookmarks,
+  reorderTabs,
+} from './browserEngine';
+
+test('DEFAULT_BOOKMARKS contains only Google, YouTube, and Wikipedia and Google is default search engine', () => {
+  assert.deepEqual(
+    DEFAULT_BOOKMARKS.map((b) => ({ title: b.title, url: b.url })),
+    [
+      { title: 'Google', url: 'https://www.google.com' },
+      { title: 'YouTube', url: 'https://www.youtube.com' },
+      { title: 'Wikipedia', url: 'https://en.wikipedia.org' },
+    ]
+  );
+
+  assert.equal(
+    normalizeAddressInput('ferrox browser shortcuts'),
+    'https://www.google.com/search?q=ferrox%20browser%20shortcuts'
+  );
+  assert.equal(
+    normalizeAddressInput('ferrox browser shortcuts', 'google'),
+    'https://www.google.com/search?q=ferrox%20browser%20shortcuts'
+  );
+});
+
+test('migrateLegacyBookmarks upgrades untouched legacy Rust starter bookmarks while preserving custom or empty lists', () => {
+  assert.deepEqual(migrateLegacyBookmarks(undefined), DEFAULT_BOOKMARKS);
+
+  const legacySaved = [
+    { id: 'bm-1', title: 'Rust Language', url: 'https://www.rust-lang.org', category: 'Dev' },
+    { id: 'bm-2', title: 'Docs.rs', url: 'https://docs.rs', category: 'Dev' },
+    { id: 'bm-3', title: 'Crates.io', url: 'https://crates.io', category: 'Dev' },
+    { id: 'bm-4', title: 'Example Domain', url: 'https://example.com', category: 'Reference' },
+    { id: 'bm-5', title: 'Rust Crate Source', url: 'ferrox://rust-source', category: 'System' },
+  ];
+  assert.deepEqual(migrateLegacyBookmarks(legacySaved), DEFAULT_BOOKMARKS);
+
+  // User intentionally deleted all bookmarks -> keep empty
+  assert.deepEqual(migrateLegacyBookmarks([]), []);
+
+  // User added custom/synced bookmarks -> keep untouched
+  const custom = [
+    { id: 'u1', title: 'GitHub', url: 'https://github.com', category: 'Work' },
+  ];
+  assert.deepEqual(migrateLegacyBookmarks(custom), custom);
+});
+
+test('reorderTabs moves tabs before/after target while preserving pinned/unpinned zones and workspaces', () => {
+  const p1 = { ...createTab('p1', 'personal', 'https://www.google.com'), pinned: true };
+  const t1 = createTab('t1', 'personal', 'https://www.youtube.com');
+  const t2 = createTab('t2', 'personal', 'https://en.wikipedia.org');
+  const t3 = createTab('t3', 'personal', 'https://github.com');
+  const w1 = createTab('w1', 'work', 'https://docs.rs');
+
+  const tabs = [p1, t1, t2, t3, w1];
+
+  // Move t3 before t1
+  const movedBefore = reorderTabs(tabs, 't3', 't1', 'before');
+  assert.deepEqual(
+    movedBefore.map((t) => t.id),
+    ['p1', 't3', 't1', 't2', 'w1']
+  );
+
+  // Move t1 after t3
+  const movedAfter = reorderTabs(tabs, 't1', 't3', 'after');
+  assert.deepEqual(
+    movedAfter.map((t) => t.id),
+    ['p1', 't2', 't3', 't1', 'w1']
+  );
+
+  // Cannot mix pinned and unpinned zones
+  const mixedPin = reorderTabs(tabs, 't1', 'p1', 'before');
+  assert.deepEqual(
+    mixedPin.map((t) => t.id),
+    ['p1', 't1', 't2', 't3', 'w1']
+  );
+
+  // Cannot reorder across different workspaces
+  const crossWs = reorderTabs(tabs, 't1', 'w1', 'after');
+  assert.deepEqual(
+    crossWs.map((t) => t.id),
+    ['p1', 't1', 't2', 't3', 'w1']
+  );
+});
+
+test('getTabsToRight returns unpinned tabs strictly after source tab in the same workspace', () => {
+  const p1 = { ...createTab('p1', 'personal', 'https://www.google.com'), pinned: true };
+  const t1 = createTab('t1', 'personal', 'https://www.youtube.com');
+  const t2 = createTab('t2', 'personal', 'https://en.wikipedia.org');
+  const t3 = createTab('t3', 'personal', 'https://github.com');
+  const w1 = createTab('w1', 'work', 'https://docs.rs');
+
+  assert.deepEqual(
+    getTabsToRight([p1, t1, t2, t3, w1], 'personal', 't1').map((t) => t.id),
+    ['t2', 't3']
+  );
+  assert.deepEqual(
+    getTabsToRight([p1, t1, t2, t3, w1], 'personal', 't3').map((t) => t.id),
+    []
+  );
+  assert.deepEqual(
+    getTabsToRight([p1, t1, t2, t3, w1], 'personal', 'p1').map((t) => t.id),
+    ['t1', 't2', 't3']
+  );
+});
+
+
